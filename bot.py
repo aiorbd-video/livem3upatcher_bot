@@ -26,14 +26,10 @@ from telegram.ext import (
 # =========================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-
 CHANNEL_ID = os.getenv("CHANNEL_ID")
-
 BOT_USERNAME = os.getenv("BOT_USERNAME")
 
-ADMIN_ID = int(
-    os.getenv("ADMIN_ID")
-)
+ADMIN_ID = int(os.getenv("ADMIN_ID"))
 
 FORCE_CHANNELS = os.getenv(
     "FORCE_CHANNELS",
@@ -105,7 +101,9 @@ admin_keyboard = ReplyKeyboardMarkup(
 def get_posted():
 
     with open(POSTED_FILE, "r") as f:
-        return set(f.read().splitlines())
+        return set(
+            f.read().splitlines()
+        )
 
 def save_posted(link):
 
@@ -136,6 +134,7 @@ def get_users():
 def get_links():
 
     with open(LINKS_FILE, "r") as f:
+
         return [
             x.strip()
             for x in f.readlines()
@@ -208,7 +207,7 @@ def parse_m3u(content):
 
             current = {}
 
-            # logo
+            # LOGO
             logo_match = re.search(
                 r'tvg-logo="([^"]+)"',
                 line
@@ -217,7 +216,7 @@ def parse_m3u(content):
             if logo_match:
                 current["logo"] = logo_match.group(1)
 
-            # group
+            # GROUP
             group_match = re.search(
                 r'group-title="([^"]+)"',
                 line
@@ -226,14 +225,14 @@ def parse_m3u(content):
             if group_match:
                 current["group"] = group_match.group(1)
 
-            # title
+            # TITLE
             if "," in line:
 
                 title = line.split(",")[-1].strip()
 
                 current["title"] = title
 
-        # STREAM URL
+        # STREAM
         elif ".m3u8" in line:
 
             current["url"] = line.strip()
@@ -243,7 +242,7 @@ def parse_m3u(content):
     return channels
 
 # =========================================================
-# SEND CHANNEL POST
+# SEND POST
 # =========================================================
 
 def send_post(
@@ -254,7 +253,8 @@ def send_post(
 ):
 
     encoded = urllib.parse.quote(
-        stream_url
+        stream_url,
+        safe=""
     )
 
     deep_link = (
@@ -264,33 +264,22 @@ def send_post(
     )
 
     text = f"""
-📡 {title}
+📡 <b>{title}</b>
 
-📂 Category: {category}
+📂 <b>Category:</b> {category}
 
-🔥 Live Stream Updated
+🔥 <b>Live Stream Updated</b>
 
-📝 Watch live streaming in HD quality.
+📝 HD live streaming available.
 
-⚠️ Access only via bot.
+🔗 <a href="{deep_link}">WATCH STREAM</a>
 
 ⚡ Auto Updated IPTV Feed
 """
 
-    buttons = {
-        "inline_keyboard": [
-            [
-                {
-                    "text": "▶ WATCH NOW",
-                    "url": deep_link
-                }
-            ]
-        ]
-    }
-
     try:
 
-        # SEND PHOTO
+        # PHOTO
         if logo:
 
             requests.post(
@@ -299,14 +288,12 @@ def send_post(
                     "chat_id": CHANNEL_ID,
                     "photo": logo,
                     "caption": text,
-                    "reply_markup": str(
-                        buttons
-                    ).replace("'", '"')
+                    "parse_mode": "HTML"
                 },
                 timeout=30
             )
 
-        # SEND MESSAGE
+        # TEXT
         else:
 
             requests.post(
@@ -314,9 +301,7 @@ def send_post(
                 data={
                     "chat_id": CHANNEL_ID,
                     "text": text,
-                    "reply_markup": str(
-                        buttons
-                    ).replace("'", '"'),
+                    "parse_mode": "HTML",
                     "disable_web_page_preview": True
                 },
                 timeout=30
@@ -326,7 +311,7 @@ def send_post(
         print("POST ERROR:", e)
 
 # =========================================================
-# FORCE JOIN CHECK
+# FORCE JOIN
 # =========================================================
 
 async def check_force_join(
@@ -560,7 +545,7 @@ async def start(
             f"""
 ✅ Stream Access Granted
 
-🔗 M3U8 Stream:
+🔗 M3U8 STREAM:
 
 {stream_link}
 """
@@ -600,9 +585,7 @@ async def messages(
     if user_id != ADMIN_ID:
         return
 
-    # =====================================================
     # ADD LINK
-    # =====================================================
 
     if text == "➕ Add Link":
 
@@ -630,9 +613,7 @@ async def messages(
 
         return
 
-    # =====================================================
     # DELETE LINK
-    # =====================================================
 
     if text == "➖ Delete Link":
 
@@ -660,9 +641,7 @@ async def messages(
 
         return
 
-    # =====================================================
     # ALL LINKS
-    # =====================================================
 
     if text == "📃 All Links":
 
@@ -686,9 +665,7 @@ async def messages(
 
         return
 
-    # =====================================================
     # USERS
-    # =====================================================
 
     if text == "👥 Total Users":
 
@@ -702,9 +679,7 @@ async def messages(
 
         return
 
-    # =====================================================
     # BROADCAST
-    # =====================================================
 
     if text == "📢 Broadcast":
 
@@ -748,15 +723,9 @@ async def messages(
 
         return
 
-    # =====================================================
     # FORCE CHECK
-    # =====================================================
 
     if text == "🔄 Force Check":
-
-        await update.message.reply_text(
-            "🔍 Checking..."
-        )
 
         threading.Thread(
             target=checker,
@@ -764,7 +733,7 @@ async def messages(
         ).start()
 
         await update.message.reply_text(
-            "✅ Started"
+            "✅ Force Check Started"
         )
 
 # =========================================================
