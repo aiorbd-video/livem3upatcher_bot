@@ -19,40 +19,45 @@ from telegram.ext import (
     filters
 )
 
-# ===================================
-# VARIABLES
-# ===================================
+# ==========================================
+# VARIABLES FROM RAILWAY
+# ==========================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 
-ADMIN_IDS = [
-    123456789
-]
+# comma separated ids/usernames
+# example:
+# FORCE_CHANNELS=@ch1,@ch2,@ch3
 
-FORCE_CHANNELS = [
-    "@channel1",
-    "@channel2",
-    "@channel3"
-]
+FORCE_CHANNELS = os.getenv(
+    "FORCE_CHANNELS",
+    ""
+).split(",")
+
+# admin telegram numeric id
+# example:
+# ADMIN_ID=123456789
+
+ADMIN_ID = int(os.getenv("ADMIN_ID"))
 
 CHECK_TIME = 300
 
 LINKS_FILE = "links.txt"
 USERS_FILE = "users.txt"
 
-# ===================================
+# ==========================================
 # CREATE FILES
-# ===================================
+# ==========================================
 
 for file in [LINKS_FILE, USERS_FILE]:
 
     if not os.path.exists(file):
         open(file, "w").close()
 
-# ===================================
+# ==========================================
 # MEMORY
-# ===================================
+# ==========================================
 
 last_links = set()
 
@@ -60,9 +65,9 @@ waiting_add = set()
 waiting_delete = set()
 waiting_broadcast = set()
 
-# ===================================
-# ADMIN KEYBOARD
-# ===================================
+# ==========================================
+# ADMIN MENU
+# ==========================================
 
 admin_keyboard = ReplyKeyboardMarkup(
     [
@@ -73,9 +78,9 @@ admin_keyboard = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
-# ===================================
-# FILE FUNCTIONS
-# ===================================
+# ==========================================
+# FILE SYSTEM
+# ==========================================
 
 def save_user(user_id):
 
@@ -97,7 +102,11 @@ def get_users():
 def get_links():
 
     with open(LINKS_FILE, "r") as f:
-        return [x.strip() for x in f.readlines() if x.strip()]
+        return [
+            x.strip()
+            for x in f.readlines()
+            if x.strip()
+        ]
 
 def save_link(link):
 
@@ -121,9 +130,9 @@ def delete_link(link):
             for l in links:
                 f.write(l + "\n")
 
-# ===================================
-# PARSE M3U
-# ===================================
+# ==========================================
+# M3U PARSER
+# ==========================================
 
 def parse_m3u(content):
 
@@ -138,9 +147,9 @@ def parse_m3u(content):
 
     return found
 
-# ===================================
+# ==========================================
 # FORCE JOIN CHECK
-# ===================================
+# ==========================================
 
 async def check_force_join(update, context):
 
@@ -150,10 +159,13 @@ async def check_force_join(update, context):
 
     for channel in FORCE_CHANNELS:
 
+        if not channel:
+            continue
+
         try:
 
             member = await context.bot.get_chat_member(
-                channel,
+                channel.strip(),
                 user_id
             )
 
@@ -172,7 +184,7 @@ async def check_force_join(update, context):
             buttons.append([
                 InlineKeyboardButton(
                     f"Join {ch}",
-                    url=f"https://t.me/{ch.replace('@', '')}"
+                    url=f"https://t.me/{ch.replace('@', '').strip()}"
                 )
             ])
 
@@ -186,7 +198,7 @@ async def check_force_join(update, context):
         keyboard = InlineKeyboardMarkup(buttons)
 
         await update.message.reply_text(
-            "❌ First Join All Channels",
+            "❌ Join All Channels First",
             reply_markup=keyboard
         )
 
@@ -194,9 +206,9 @@ async def check_force_join(update, context):
 
     return True
 
-# ===================================
-# CALLBACK
-# ===================================
+# ==========================================
+# CALLBACK BUTTON
+# ==========================================
 
 async def button_callback(update, context):
 
@@ -210,10 +222,13 @@ async def button_callback(update, context):
 
     for channel in FORCE_CHANNELS:
 
+        if not channel:
+            continue
+
         try:
 
             member = await context.bot.get_chat_member(
-                channel,
+                channel.strip(),
                 user_id
             )
 
@@ -236,9 +251,9 @@ async def button_callback(update, context):
             show_alert=True
         )
 
-# ===================================
+# ==========================================
 # AUTO CHECKER
-# ===================================
+# ==========================================
 
 def checker(app):
 
@@ -288,9 +303,9 @@ def checker(app):
 
         time.sleep(CHECK_TIME)
 
-# ===================================
+# ==========================================
 # START
-# ===================================
+# ==========================================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
@@ -303,7 +318,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     save_user(user_id)
 
-    if user_id in ADMIN_IDS:
+    if user_id == ADMIN_ID:
 
         await update.message.reply_text(
             "✅ Admin Panel",
@@ -316,9 +331,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "✅ Bot Access Granted"
         )
 
-# ===================================
-# MESSAGE HANDLER
-# ===================================
+# ==========================================
+# MESSAGES
+# ==========================================
 
 async def messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
@@ -327,7 +342,7 @@ async def messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     save_user(user_id)
 
-    if user_id not in ADMIN_IDS:
+    if user_id != ADMIN_ID:
         return
 
     # ADD LINK
@@ -499,15 +514,17 @@ async def messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             await update.message.reply_text(str(e))
 
-# ===================================
+# ==========================================
 # MAIN
-# ===================================
+# ==========================================
 
 def main():
 
     app = Application.builder().token(BOT_TOKEN).build()
 
-    app.add_handler(CommandHandler("start", start))
+    app.add_handler(
+        CommandHandler("start", start)
+    )
 
     app.add_handler(
         CallbackQueryHandler(button_callback)
