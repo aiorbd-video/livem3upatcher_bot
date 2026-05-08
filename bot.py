@@ -43,7 +43,7 @@ FORCE_CHANNELS = [
     x.strip() for x in os.getenv("FORCE_CHANNELS", "").split(",") if x.strip()
 ]
 CHECK_TIME = int(os.getenv("CHECK_TIME", "300"))
-DELETE_TIME = 300  # ৫ মিনিট (৩০০ সেকেন্ড) পর লিংক ডিলিট হবে
+DELETE_TIME = 300  # ৫ মিনিট (৩০০ সেকেন্ড)
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
@@ -92,18 +92,29 @@ async def save_posted_stream(stream_url: str, title: str):
     )
     await stats_col.update_one({"stat_name": "total_posted"}, {"$inc": {"count": 1}}, upsert=True)
 
-async def create_short_link(stream_url: str):
+async def create_short_link(stream_url: str, referer: str, origin: str):
     short_id = hashlib.md5(stream_url.encode()).hexdigest()[:12]
     await links_col.update_one(
         {"short_id": short_id}, 
-        {"$set": {"short_id": short_id, "stream_url": stream_url}}, 
+        {"$set": {
+            "short_id": short_id, 
+            "stream_url": stream_url,
+            "referer": referer,
+            "origin": origin
+        }}, 
         upsert=True
     )
     return short_id
 
-async def get_long_link(short_id: str):
+async def get_stream_data(short_id: str):
     doc = await links_col.find_one({"short_id": short_id})
-    return doc["stream_url"] if doc else None
+    if doc:
+        return {
+            "stream_url": doc.get("stream_url", ""),
+            "referer": doc.get("referer", ""),
+            "origin": doc.get("origin", "")
+        }
+    return None
 
 async def track_click():
     await stats_col.update_one({"stat_name": "total_clicks"}, {"$inc": {"count": 1}}, upsert=True)
@@ -129,7 +140,7 @@ admin_keyboard = ReplyKeyboardMarkup(
 )
 
 # =========================================================
-# ASYNC NETWORK & M3U PARSER
+# SMART M3U PARSER (Extracts Referer & Origin)
 # =========================================================
 async def fetch_m3u_content(url: str):
     try:
@@ -144,13 +155,14 @@ async def fetch_m3u_content(url: str):
 def parse_m3u_playlist(content: str):
     streams = []
     lines = content.splitlines()
-    current_stream = {}
+    current_stream = {"title": "অজানা স্ট্রিম", "group": "লাইভ টিভি", "logo": "", "referer": "", "origin": ""}
 
     for line in lines:
         line = line.strip()
+        
+        # EXTINF Data
         if line.startswith("#EXTINF"):
-            current_stream = {"title": "অজানা স্ট্রিম", "group": "লাইভ টিভি", "logo": ""}
-            
+            current_stream = {"title": "অজানা স্ট্রিম", "group": "লাইভ টিভি", "logo": "", "referer": "", "origin": ""}
             if "," in line:
                 current_stream["title"] = line.split(",")[-1].strip()
             
@@ -160,10 +172,31 @@ def parse_m3u_playlist(content: str):
             if group_match: current_stream["group"] = group_match.group(1)
             if logo_match: current_stream["logo"] = logo_match.group(1)
 
+        # VLC Options (e.g. #EXTVLCOPT:http-referrer=...)
+        elif line.startswith("#EXTVLCOPT:http-referrer="):
+            current_stream["referer"] = line.split("=")[1].strip()
+        elif line.startswith("#EXTVLCOPT:http-origin="):
+            current_stream["origin"] = line.split("=")[1].strip()
+
+        # Stream Link + Inline Headers (e.g. |Referer=...)
         elif line.startswith("http") and (".m3u8" in line or ".ts" in line):
-            current_stream["url"] = line
+            raw_url = line
+            
+            # Pipe (|) syntax parse
+            if "|" in raw_url:
+                parts = raw_url.split("|")
+                raw_url = parts[0]
+                headers_part = parts[1]
+                
+                ref_match = re.search(r'Referer=([^&]+)', headers_part)
+                orig_match = re.search(r'Origin=([^&]+)', headers_part)
+                
+                if ref_match: current_stream["referer"] = ref_match.group(1)
+                if orig_match: current_stream["origin"] = orig_match.group(1)
+
+            current_stream["url"] = raw_url
             streams.append(current_stream)
-            current_stream = {}
+            current_stream = {"title": "অজানা স্ট্রিম", "group": "লাইভ টিভি", "logo": "", "referer": "", "origin": ""}
 
     return streams
 
@@ -192,8 +225,9 @@ def get_force_join_keyboard(payload=None):
 # =========================================================
 # AUTO CHANNEL POSTING JOB
 # =========================================================
-async def post_to_channel(context: ContextTypes.DEFAULT_TYPE, title, category, logo, stream_url):
-    short_id = await create_short_link(stream_url)
+async def post_to_channel(context: ContextTypes.DEFAULT_TYPE, title, category, logo, stream_url, referer, origin):
+    # ডাটাবেসে লিংক, referer এবং origin সেভ করা হচ্ছে
+    short_id = await create_short_link(stream_url, referer, origin)
     deep_link = f"https://t.me/{BOT_USERNAME}?start={short_id}"
 
     text = (
@@ -233,7 +267,9 @@ async def auto_checker_job(context: ContextTypes.DEFAULT_TYPE):
                 item["title"], 
                 item["group"], 
                 item["logo"], 
-                stream_url
+                stream_url,
+                item["referer"],
+                item["origin"]
             )
             await save_posted_stream(stream_url, item["title"])
 
@@ -246,22 +282,47 @@ async def delete_link_message(context: ContextTypes.DEFAULT_TYPE):
     message_id = job_data["message_id"]
 
     try:
-        # আগের লিংক সম্বলিত মেসেজটি ডিলিট করবে
         await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
         
-        # ইউজারকে একটি অ্যালার্ট মেসেজ পাঠাবে
         warning_text = (
-            "⚠️ <b>সিকিউরিটি অ্যালার্ট:</b>\n\n"
-            "আপনার লিংকের মেয়াদ শেষ হয়ে গেছে এবং সিকিউরিটির জন্য লিংকটি অটোমেটিক রিমুভ করা হয়েছে। "
-            "ভিডিও পুনরায় দেখতে চ্যানেল থেকে আবার লিংকে ক্লিক করুন।"
+            "⚠️ <b>মেয়াদ উত্তীর্ণ:</b>\n\n"
+            "সিকিউরিটির জন্য আপনার লিংকের মেয়াদ শেষ হয়ে গেছে। "
+            "ভিডিও পুনরায় দেখতে চাইলে চ্যানেল থেকে আবার লিংকে ক্লিক করুন।"
         )
         await context.bot.send_message(chat_id=chat_id, text=warning_text, parse_mode="HTML")
     except Exception as e:
         logger.error(f"Failed to auto-delete message: {e}")
 
 # =========================================================
-# BOT HANDLERS
+# BOT HANDLERS (User Friendly UI)
 # =========================================================
+async def send_stream_message(context, chat_id, data, message_to_edit=None):
+    stream_url = data["stream_url"]
+    referer = data["referer"]
+    origin = data["origin"]
+
+    # User friendly clean UI
+    msg_text = f"✅ <b>স্ট্রিম অ্যাক্সেস অনুমোদিত!</b>\n\n🔗 <b>আপনার প্লেব্যাক লিংক:</b>\n<code>{stream_url}</code>\n"
+    
+    if referer:
+        msg_text += f"\n🌐 <b>Referer:</b>\n<code>{referer}</code>"
+    if origin:
+        msg_text += f"\n🌍 <b>Origin:</b>\n<code>{origin}</code>"
+        
+    msg_text += "\n\n<i>(যেকোনো কাস্টম প্লেয়ার বা NS Player অ্যাপে এটি প্লে করতে পারবেন) reffer ও origin ও custom user agent থাকলে আপনাকে NS player এ সব ঠিকভাবে বসাতে হবে তবেই ভিডিও চলবে। This Bot is Developed by Ratul. join my tg channel @allonebd @bdvpnfile @itsmeratul. subscribe my youtube channel https://youtube.com/itsmeratulfti</i>\n\n⏳ <b>বিঃদ্রঃ</b> ৫ মিনিট পর মেসেজটি ডিলিট হয়ে যাবে।"
+
+    if message_to_edit:
+        msg = await message_to_edit.edit_text(msg_text, parse_mode="HTML")
+    else:
+        msg = await context.bot.send_message(chat_id=chat_id, text=msg_text, parse_mode="HTML")
+
+    # ৫ মিনিট পর ডিলিট
+    context.job_queue.run_once(
+        delete_link_message, 
+        when=DELETE_TIME, 
+        data={"chat_id": chat_id, "message_id": msg.message_id}
+    )
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
@@ -269,7 +330,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     payload = context.args[0] if context.args else None
 
-    # Force Join Check
+    # Force Join
     if not await is_user_joined(user_id, context):
         await update.message.reply_text(
             "❌ <b>অ্যাক্সেস ডিনাইড!</b>\n\nলিংক পেতে বা বট ব্যবহার করতে হলে আপনাকে প্রথমে আমাদের স্পন্সর চ্যানেলগুলোতে যুক্ত হতে হবে।",
@@ -278,27 +339,12 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Deep Link Stream Access (লিংক প্রদান এবং অটো ডিলিট টাইমার সেট)
+    # Link Access
     if payload:
-        stream_link = await get_long_link(payload)
-        if stream_link:
+        stream_data = await get_stream_data(payload)
+        if stream_data:
             await track_click() 
-            
-            # মেসেজ সেন্ড করা
-            msg = await update.message.reply_text(
-                f"✅ <b>স্ট্রিম অ্যাক্সেস অনুমোদিত!</b>\n\n"
-                f"🔗 <b>আপনার M3U8 লিংক:</b>\n\n<code>{stream_link}</code>\n\n"
-                f"<i>(লিংকটি কপি করে All In One Reborn বা অন্য যেকোনো প্লেয়ারে প্লে করুন)</i>\n\n"
-                f"⏳ <b>বিঃদ্রঃ</b> সিকিউরিটির জন্য ৫ মিনিট পর এই লিংকটি অটোমেটিক ডিলিট হয়ে যাবে।",
-                parse_mode="HTML"
-            )
-
-            # ৫ মিনিট পর মেসেজ ডিলিট করার জব শিডিউল করা
-            context.job_queue.run_once(
-                delete_link_message, 
-                when=DELETE_TIME, 
-                data={"chat_id": chat_id, "message_id": msg.message_id}
-            )
+            await send_stream_message(context, chat_id, stream_data)
         else:
             await update.message.reply_text("❌ দুঃখিত, এই লিংকটির মেয়াদ শেষ বা ডাটাবেসে পাওয়া যায়নি।")
         return
@@ -322,24 +368,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if await is_user_joined(user_id, context):
             if payload:
-                stream_link = await get_long_link(payload)
-                if stream_link:
+                stream_data = await get_stream_data(payload)
+                if stream_data:
                     await track_click()
-                    
-                    # মেসেজ আপডেট করে লিংক দেওয়া
-                    msg = await query.message.edit_text(
-                        f"✅ <b>ভেরিফিকেশন সম্পন্ন!</b>\n\n"
-                        f"🔗 <b>আপনার M3U8 লিংক:</b>\n\n<code>{stream_link}</code>\n\n"
-                        f"⏳ <b>বিঃদ্রঃ</b> সিকিউরিটির জন্য ৫ মিনিট পর এই লিংকটি অটোমেটিক ডিলিট হয়ে যাবে।",
-                        parse_mode="HTML"
-                    )
-                    
-                    # ৫ মিনিট পর মেসেজ ডিলিট করার জব শিডিউল করা
-                    context.job_queue.run_once(
-                        delete_link_message, 
-                        when=DELETE_TIME, 
-                        data={"chat_id": chat_id, "message_id": msg.message_id}
-                    )
+                    await send_stream_message(context, chat_id, stream_data, message_to_edit=query.message)
                 else:
                     await query.message.edit_text("❌ লিংকটি খুঁজে পাওয়া যায়নি।")
             else:
@@ -440,7 +472,7 @@ def main():
 
     app.job_queue.run_repeating(auto_checker_job, interval=CHECK_TIME, first=10)
 
-    logger.info("All In One Reborn - Enterprise Bot is RUNNING with MongoDB and Auto-Delete System...")
+    logger.info("All In One Reborn - Enterprise Bot is RUNNING with MongoDB, Auto-Delete & Header Parser...")
     app.run_polling()
 
 if __name__ == "__main__":
