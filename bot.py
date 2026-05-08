@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import threading
 import requests
@@ -6,8 +7,8 @@ import requests
 from telegram import (
     Update,
     ReplyKeyboardMarkup,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup
+    InlineKeyboardMarkup,
+    InlineKeyboardButton
 )
 
 from telegram.ext import (
@@ -19,25 +20,17 @@ from telegram.ext import (
     filters
 )
 
-# ==========================================
-# VARIABLES FROM RAILWAY
-# ==========================================
+# ======================================================
+# VARIABLES
+# ======================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
-
-# comma separated ids/usernames
-# example:
-# FORCE_CHANNELS=@ch1,@ch2,@ch3
 
 FORCE_CHANNELS = os.getenv(
     "FORCE_CHANNELS",
     ""
 ).split(",")
-
-# admin telegram numeric id
-# example:
-# ADMIN_ID=123456789
 
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
 
@@ -45,29 +38,49 @@ CHECK_TIME = 300
 
 LINKS_FILE = "links.txt"
 USERS_FILE = "users.txt"
+POSTED_FILE = "posted.txt"
 
-# ==========================================
+# ======================================================
+# REQUEST SESSION
+# ======================================================
+
+session = requests.Session()
+
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 "
+        "(KHTML, like Gecko) "
+        "Chrome/124.0 Safari/537.36"
+    ),
+    "Accept": "*/*",
+    "Connection": "keep-alive"
+}
+
+# ======================================================
 # CREATE FILES
-# ==========================================
+# ======================================================
 
-for file in [LINKS_FILE, USERS_FILE]:
+for file in [
+    LINKS_FILE,
+    USERS_FILE,
+    POSTED_FILE
+]:
 
     if not os.path.exists(file):
         open(file, "w").close()
 
-# ==========================================
+# ======================================================
 # MEMORY
-# ==========================================
-
-last_links = set()
+# ======================================================
 
 waiting_add = set()
 waiting_delete = set()
 waiting_broadcast = set()
 
-# ==========================================
+# ======================================================
 # ADMIN MENU
-# ==========================================
+# ======================================================
 
 admin_keyboard = ReplyKeyboardMarkup(
     [
@@ -78,9 +91,23 @@ admin_keyboard = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
-# ==========================================
-# FILE SYSTEM
-# ==========================================
+# ======================================================
+# FILE FUNCTIONS
+# ======================================================
+
+def get_posted():
+
+    with open(POSTED_FILE, "r") as f:
+        return set(f.read().splitlines())
+
+def save_posted(link):
+
+    posted = get_posted()
+
+    if link not in posted:
+
+        with open(POSTED_FILE, "a") as f:
+            f.write(link + "\n")
 
 def save_user(user_id):
 
@@ -130,26 +157,74 @@ def delete_link(link):
             for l in links:
                 f.write(l + "\n")
 
-# ==========================================
-# M3U PARSER
-# ==========================================
+# ======================================================
+# TELEGRAM POST
+# ======================================================
+
+def send_channel_post(text):
+
+    try:
+
+        requests.get(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+            params={
+                "chat_id": CHANNEL_ID,
+                "text": text,
+                "disable_web_page_preview": True
+            },
+            timeout=30
+        )
+
+    except Exception as e:
+        print("POST ERROR:", e)
+
+# ======================================================
+# PARSE M3U
+# ======================================================
 
 def parse_m3u(content):
 
-    found = []
+    results = []
 
-    for line in content.splitlines():
+    regex = r'https?:\/\/[^\s"]+\.m3u8[^\s"]*'
 
-        line = line.strip()
+    matches = re.findall(regex, content)
 
-        if ".m3u8" in line:
-            found.append(line)
+    for link in matches:
 
-    return found
+        link = link.strip()
 
-# ==========================================
-# FORCE JOIN CHECK
-# ==========================================
+        if link not in results:
+            results.append(link)
+
+    return results
+
+# ======================================================
+# FETCH URL
+# ======================================================
+
+def fetch_url(url):
+
+    try:
+
+        response = session.get(
+            url,
+            headers=HEADERS,
+            timeout=30,
+            allow_redirects=True
+        )
+
+        if response.status_code == 200:
+            return response.text
+
+    except Exception as e:
+        print("FETCH ERROR:", e)
+
+    return None
+
+# ======================================================
+# FORCE JOIN
+# ======================================================
 
 async def check_force_join(update, context):
 
@@ -169,7 +244,10 @@ async def check_force_join(update, context):
                 user_id
             )
 
-            if member.status in ["left", "kicked"]:
+            if member.status in [
+                "left",
+                "kicked"
+            ]:
                 not_joined.append(channel)
 
         except:
@@ -183,14 +261,14 @@ async def check_force_join(update, context):
 
             buttons.append([
                 InlineKeyboardButton(
-                    f"Join {ch}",
+                    text=f"Join {ch}",
                     url=f"https://t.me/{ch.replace('@', '').strip()}"
                 )
             ])
 
         buttons.append([
             InlineKeyboardButton(
-                "✅ Joined",
+                text="✅ Joined",
                 callback_data="check_join"
             )
         ])
@@ -206,9 +284,9 @@ async def check_force_join(update, context):
 
     return True
 
-# ==========================================
-# CALLBACK BUTTON
-# ==========================================
+# ======================================================
+# CALLBACK
+# ======================================================
 
 async def button_callback(update, context):
 
@@ -232,7 +310,10 @@ async def button_callback(update, context):
                 user_id
             )
 
-            if member.status in ["left", "kicked"]:
+            if member.status in [
+                "left",
+                "kicked"
+            ]:
                 not_joined.append(channel)
 
         except:
@@ -251,65 +332,62 @@ async def button_callback(update, context):
             show_alert=True
         )
 
-# ==========================================
+# ======================================================
 # AUTO CHECKER
-# ==========================================
+# ======================================================
 
-def checker(app):
-
-    global last_links
+def checker():
 
     while True:
 
         try:
 
-            all_current = set()
-
             links = get_links()
 
-            for url in links:
+            posted = get_posted()
 
-                try:
+            for m3u_url in links:
 
-                    r = requests.get(url, timeout=20)
+                print("CHECKING:", m3u_url)
 
-                    streams = parse_m3u(r.text)
+                content = fetch_url(m3u_url)
 
-                    all_current.update(streams)
+                if not content:
+                    continue
 
-                except:
-                    pass
+                streams = parse_m3u(content)
 
-            new_links = all_current - last_links
+                for stream in streams:
 
-            for stream in new_links:
+                    if stream in posted:
+                        continue
 
-                try:
-
-                    app.bot.send_message(
-                        chat_id=CHANNEL_ID,
-                        text=f"🔴 Updated Stream\n\n{stream}"
+                    text = (
+                        "🔴 Updated Stream\n\n"
+                        f"{stream}"
                     )
+
+                    send_channel_post(text)
+
+                    save_posted(stream)
 
                     print("POSTED:", stream)
 
-                except Exception as e:
-                    print(e)
-
-            last_links = all_current
-
         except Exception as e:
-            print(e)
+            print("CHECKER ERROR:", e)
 
         time.sleep(CHECK_TIME)
 
-# ==========================================
+# ======================================================
 # START
-# ==========================================
+# ======================================================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    ok = await check_force_join(update, context)
+    ok = await check_force_join(
+        update,
+        context
+    )
 
     if not ok:
         return
@@ -331,28 +409,30 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "✅ Bot Access Granted"
         )
 
-# ==========================================
+# ======================================================
 # MESSAGES
-# ==========================================
+# ======================================================
 
 async def messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_id = update.effective_user.id
-    text = update.message.text
+    text = update.message.text.strip()
 
     save_user(user_id)
 
     if user_id != ADMIN_ID:
         return
 
+    # ==================================================
     # ADD LINK
+    # ==================================================
 
     if text == "➕ Add Link":
 
         waiting_add.add(user_id)
 
         await update.message.reply_text(
-            "Send M3U Link"
+            "Send M3U URL"
         )
 
         return
@@ -364,19 +444,21 @@ async def messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
         waiting_add.remove(user_id)
 
         await update.message.reply_text(
-            "✅ Link Added"
+            "✅ M3U Added Successfully"
         )
 
         return
 
+    # ==================================================
     # DELETE LINK
+    # ==================================================
 
     if text == "➖ Delete Link":
 
         waiting_delete.add(user_id)
 
         await update.message.reply_text(
-            "Send Exact Link To Delete"
+            "Send Exact M3U URL"
         )
 
         return
@@ -393,7 +475,9 @@ async def messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         return
 
+    # ==================================================
     # ALL LINKS
+    # ==================================================
 
     if text == "📃 All Links":
 
@@ -402,7 +486,7 @@ async def messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not links:
 
             await update.message.reply_text(
-                "No Links"
+                "No Links Found"
             )
 
         else:
@@ -413,7 +497,9 @@ async def messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         return
 
-    # TOTAL USERS
+    # ==================================================
+    # USERS
+    # ==================================================
 
     if text == "👥 Total Users":
 
@@ -425,7 +511,9 @@ async def messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         return
 
+    # ==================================================
     # BROADCAST
+    # ==================================================
 
     if text == "📢 Broadcast":
 
@@ -460,12 +548,14 @@ async def messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
         waiting_broadcast.remove(user_id)
 
         await update.message.reply_text(
-            f"✅ Broadcast Sent To {sent} Users"
+            f"✅ Broadcast Sent: {sent}"
         )
 
         return
 
+    # ==================================================
     # FORCE CHECK
+    # ==================================================
 
     if text == "🔄 Force Check":
 
@@ -473,54 +563,24 @@ async def messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🔍 Checking..."
         )
 
-        try:
+        threading.Thread(
+            target=checker,
+            daemon=True
+        ).start()
 
-            all_current = set()
+        await update.message.reply_text(
+            "✅ Started"
+        )
 
-            links = get_links()
-
-            for url in links:
-
-                try:
-
-                    r = requests.get(url, timeout=20)
-
-                    streams = parse_m3u(r.text)
-
-                    all_current.update(streams)
-
-                except:
-                    pass
-
-            new_links = all_current - last_links
-
-            for stream in new_links:
-
-                try:
-
-                    await context.bot.send_message(
-                        chat_id=CHANNEL_ID,
-                        text=f"🔴 Updated Stream\n\n{stream}"
-                    )
-
-                except:
-                    pass
-
-            await update.message.reply_text(
-                f"✅ Done\nNew Links: {len(new_links)}"
-            )
-
-        except Exception as e:
-
-            await update.message.reply_text(str(e))
-
-# ==========================================
+# ======================================================
 # MAIN
-# ==========================================
+# ======================================================
 
 def main():
 
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = Application.builder().token(
+        BOT_TOKEN
+    ).build()
 
     app.add_handler(
         CommandHandler("start", start)
@@ -534,13 +594,10 @@ def main():
         MessageHandler(filters.TEXT, messages)
     )
 
-    thread = threading.Thread(
+    threading.Thread(
         target=checker,
-        args=(app,),
         daemon=True
-    )
-
-    thread.start()
+    ).start()
 
     print("BOT RUNNING...")
 
