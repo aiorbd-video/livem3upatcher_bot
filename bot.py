@@ -20,9 +20,9 @@ from telegram.ext import (
     filters
 )
 
-# ======================================================
+# =========================================================
 # VARIABLES
-# ======================================================
+# =========================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
@@ -40,26 +40,27 @@ LINKS_FILE = "links.txt"
 USERS_FILE = "users.txt"
 POSTED_FILE = "posted.txt"
 
-# ======================================================
+# =========================================================
 # REQUEST SESSION
-# ======================================================
+# =========================================================
 
 session = requests.Session()
 
 HEADERS = {
     "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "Mozilla/5.0 "
+        "(Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 "
         "(KHTML, like Gecko) "
-        "Chrome/124.0 Safari/537.36"
+        "Chrome/124 Safari/537.36"
     ),
     "Accept": "*/*",
     "Connection": "keep-alive"
 }
 
-# ======================================================
+# =========================================================
 # CREATE FILES
-# ======================================================
+# =========================================================
 
 for file in [
     LINKS_FILE,
@@ -70,17 +71,17 @@ for file in [
     if not os.path.exists(file):
         open(file, "w").close()
 
-# ======================================================
+# =========================================================
 # MEMORY
-# ======================================================
+# =========================================================
 
 waiting_add = set()
 waiting_delete = set()
 waiting_broadcast = set()
 
-# ======================================================
+# =========================================================
 # ADMIN MENU
-# ======================================================
+# =========================================================
 
 admin_keyboard = ReplyKeyboardMarkup(
     [
@@ -91,9 +92,9 @@ admin_keyboard = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
-# ======================================================
+# =========================================================
 # FILE FUNCTIONS
-# ======================================================
+# =========================================================
 
 def get_posted():
 
@@ -157,51 +158,71 @@ def delete_link(link):
             for l in links:
                 f.write(l + "\n")
 
-# ======================================================
+# =========================================================
 # TELEGRAM POST
-# ======================================================
+# =========================================================
 
-def send_channel_post(text):
+def send_post(
+    title,
+    category,
+    logo,
+    stream_url
+):
+
+    buttons = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "▶ Watch Stream",
+                url="https://t.me/" + str(
+                    CHANNEL_ID
+                ).replace("@", "")
+            )
+        ]
+    ])
+
+    text = f"""
+📡 {title}
+
+📂 Category: {category}
+
+🔥 Stream Updated
+
+📝 Live event streaming available.
+
+⚡ Auto Updated IPTV Feed
+"""
 
     try:
 
-        requests.get(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-            params={
-                "chat_id": CHANNEL_ID,
-                "text": text,
-                "disable_web_page_preview": True
-            },
-            timeout=30
-        )
+        if logo:
+
+            requests.get(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto",
+                params={
+                    "chat_id": CHANNEL_ID,
+                    "photo": logo,
+                    "caption": text
+                },
+                timeout=30
+            )
+
+        else:
+
+            requests.get(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                params={
+                    "chat_id": CHANNEL_ID,
+                    "text": text
+                },
+                timeout=30
+            )
 
     except Exception as e:
         print("POST ERROR:", e)
 
-# ======================================================
-# PARSE M3U
-# ======================================================
-
-def parse_m3u(content):
-
-    results = []
-
-    regex = r'https?:\/\/[^\s"]+\.m3u8[^\s"]*'
-
-    matches = re.findall(regex, content)
-
-    for link in matches:
-
-        link = link.strip()
-
-        if link not in results:
-            results.append(link)
-
-    return results
-
-# ======================================================
+# =========================================================
 # FETCH URL
-# ======================================================
+# =========================================================
 
 def fetch_url(url):
 
@@ -222,9 +243,64 @@ def fetch_url(url):
 
     return None
 
-# ======================================================
+# =========================================================
+# PARSE M3U
+# =========================================================
+
+def parse_m3u(content):
+
+    channels = []
+
+    lines = content.splitlines()
+
+    current = {}
+
+    for line in lines:
+
+        line = line.strip()
+
+        # EXTINF
+        if line.startswith("#EXTINF"):
+
+            current = {}
+
+            # logo
+            logo_match = re.search(
+                r'tvg-logo="([^"]+)"',
+                line
+            )
+
+            if logo_match:
+                current["logo"] = logo_match.group(1)
+
+            # group
+            group_match = re.search(
+                r'group-title="([^"]+)"',
+                line
+            )
+
+            if group_match:
+                current["group"] = group_match.group(1)
+
+            # title
+            if "," in line:
+
+                title = line.split(",")[-1].strip()
+
+                current["title"] = title
+
+        # m3u8 url
+        elif ".m3u8" in line:
+
+            current["url"] = line.strip()
+
+            channels.append(current)
+
+    return channels
+
+# =========================================================
 # FORCE JOIN
-# ======================================================
+# =========================================================
 
 async def check_force_join(update, context):
 
@@ -261,14 +337,14 @@ async def check_force_join(update, context):
 
             buttons.append([
                 InlineKeyboardButton(
-                    text=f"Join {ch}",
+                    f"Join {ch}",
                     url=f"https://t.me/{ch.replace('@', '').strip()}"
                 )
             ])
 
         buttons.append([
             InlineKeyboardButton(
-                text="✅ Joined",
+                "✅ Joined",
                 callback_data="check_join"
             )
         ])
@@ -284,9 +360,9 @@ async def check_force_join(update, context):
 
     return True
 
-# ======================================================
+# =========================================================
 # CALLBACK
-# ======================================================
+# =========================================================
 
 async def button_callback(update, context):
 
@@ -332,9 +408,9 @@ async def button_callback(update, context):
             show_alert=True
         )
 
-# ======================================================
+# =========================================================
 # AUTO CHECKER
-# ======================================================
+# =========================================================
 
 def checker():
 
@@ -357,32 +433,55 @@ def checker():
 
                 streams = parse_m3u(content)
 
-                for stream in streams:
+                for item in streams:
 
-                    if stream in posted:
+                    stream_url = item.get("url")
+
+                    if not stream_url:
                         continue
 
-                    text = (
-                        "🔴 Updated Stream\n\n"
-                        f"{stream}"
+                    if stream_url in posted:
+                        continue
+
+                    title = item.get(
+                        "title",
+                        "Unknown Stream"
                     )
 
-                    send_channel_post(text)
+                    category = item.get(
+                        "group",
+                        "Live TV"
+                    )
 
-                    save_posted(stream)
+                    logo = item.get(
+                        "logo",
+                        ""
+                    )
 
-                    print("POSTED:", stream)
+                    send_post(
+                        title,
+                        category,
+                        logo,
+                        stream_url
+                    )
+
+                    save_posted(stream_url)
+
+                    print("POSTED:", title)
 
         except Exception as e:
             print("CHECKER ERROR:", e)
 
         time.sleep(CHECK_TIME)
 
-# ======================================================
+# =========================================================
 # START
-# ======================================================
+# =========================================================
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     ok = await check_force_join(
         update,
@@ -406,14 +505,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
 
         await update.message.reply_text(
-            "✅ Bot Access Granted"
+            "✅ Access Granted"
         )
 
-# ======================================================
-# MESSAGES
-# ======================================================
+# =========================================================
+# MESSAGE HANDLER
+# =========================================================
 
-async def messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def messages(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     user_id = update.effective_user.id
     text = update.message.text.strip()
@@ -423,9 +525,9 @@ async def messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id != ADMIN_ID:
         return
 
-    # ==================================================
+    # =====================================================
     # ADD LINK
-    # ==================================================
+    # =====================================================
 
     if text == "➕ Add Link":
 
@@ -444,14 +546,14 @@ async def messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
         waiting_add.remove(user_id)
 
         await update.message.reply_text(
-            "✅ M3U Added Successfully"
+            "✅ M3U Added"
         )
 
         return
 
-    # ==================================================
+    # =====================================================
     # DELETE LINK
-    # ==================================================
+    # =====================================================
 
     if text == "➖ Delete Link":
 
@@ -475,9 +577,9 @@ async def messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         return
 
-    # ==================================================
+    # =====================================================
     # ALL LINKS
-    # ==================================================
+    # =====================================================
 
     if text == "📃 All Links":
 
@@ -497,9 +599,9 @@ async def messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         return
 
-    # ==================================================
+    # =====================================================
     # USERS
-    # ==================================================
+    # =====================================================
 
     if text == "👥 Total Users":
 
@@ -511,9 +613,9 @@ async def messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         return
 
-    # ==================================================
+    # =====================================================
     # BROADCAST
-    # ==================================================
+    # =====================================================
 
     if text == "📢 Broadcast":
 
@@ -553,9 +655,9 @@ async def messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         return
 
-    # ==================================================
+    # =====================================================
     # FORCE CHECK
-    # ==================================================
+    # =====================================================
 
     if text == "🔄 Force Check":
 
@@ -572,9 +674,9 @@ async def messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "✅ Started"
         )
 
-# ======================================================
+# =========================================================
 # MAIN
-# ======================================================
+# =========================================================
 
 def main():
 
