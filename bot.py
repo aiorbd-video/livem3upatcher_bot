@@ -4,7 +4,6 @@ import time
 import json
 import base64
 import threading
-import urllib.parse
 import requests
 
 from telegram import (
@@ -28,15 +27,23 @@ from telegram.ext import (
 # =========================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+
 CHANNEL_ID = os.getenv("CHANNEL_ID")
+
 BOT_USERNAME = os.getenv("BOT_USERNAME")
 
-ADMIN_ID = int(os.getenv("ADMIN_ID"))
+ADMIN_ID = int(
+    os.getenv("ADMIN_ID")
+)
 
-FORCE_CHANNELS = os.getenv(
-    "FORCE_CHANNELS",
-    ""
-).split(",")
+FORCE_CHANNELS = [
+    x.strip()
+    for x in os.getenv(
+        "FORCE_CHANNELS",
+        ""
+    ).split(",")
+    if x.strip()
+]
 
 CHECK_TIME = int(
     os.getenv("CHECK_TIME", "300")
@@ -58,10 +65,12 @@ for file in [
     LINKS_FILE,
     USERS_FILE
 ]:
+
     if not os.path.exists(file):
         open(file, "w").close()
 
 if not os.path.exists(POSTED_FILE):
+
     with open(POSTED_FILE, "w") as f:
         json.dump({}, f)
 
@@ -78,9 +87,7 @@ HEADERS = {
         "AppleWebKit/537.36 "
         "(KHTML, like Gecko) "
         "Chrome/124 Safari/537.36"
-    ),
-    "Accept": "*/*",
-    "Connection": "keep-alive"
+    )
 }
 
 # =========================================================
@@ -157,7 +164,7 @@ def delete_link(link):
                 f.write(l + "\n")
 
 # =========================================================
-# POSTED DATABASE
+# POST DATABASE
 # =========================================================
 
 def get_posted():
@@ -171,6 +178,22 @@ def save_posted(data):
         json.dump(data, f, indent=4)
 
 # =========================================================
+# ENCODE / DECODE
+# =========================================================
+
+def encode_link(link):
+
+    return base64.urlsafe_b64encode(
+        link.encode()
+    ).decode()
+
+def decode_link(data):
+
+    return base64.urlsafe_b64decode(
+        data.encode()
+    ).decode()
+
+# =========================================================
 # FETCH URL
 # =========================================================
 
@@ -181,8 +204,7 @@ def fetch_url(url):
         response = session.get(
             url,
             headers=HEADERS,
-            timeout=30,
-            allow_redirects=True
+            timeout=30
         )
 
         if response.status_code == 200:
@@ -209,32 +231,44 @@ def parse_m3u(content):
 
         line = line.strip()
 
+        # EXTINF
         if line.startswith("#EXTINF"):
 
             current = {}
 
-            # title
+            # TITLE
             if "," in line:
-                current["title"] = line.split(",")[-1].strip()
 
-            # logo
-            logo_match = re.search(
-                r'tvg-logo="([^"]+)"',
-                line
-            )
+                current["title"] = (
+                    line.split(",")[-1]
+                    .strip()
+                )
 
-            if logo_match:
-                current["logo"] = logo_match.group(1)
-
-            # group
+            # GROUP
             group_match = re.search(
                 r'group-title="([^"]+)"',
                 line
             )
 
             if group_match:
-                current["group"] = group_match.group(1)
 
+                current["group"] = (
+                    group_match.group(1)
+                )
+
+            # LOGO
+            logo_match = re.search(
+                r'tvg-logo="([^"]+)"',
+                line
+            )
+
+            if logo_match:
+
+                current["logo"] = (
+                    logo_match.group(1)
+                )
+
+        # STREAM
         elif ".m3u8" in line:
 
             current["url"] = line.strip()
@@ -242,26 +276,6 @@ def parse_m3u(content):
             channels.append(current)
 
     return channels
-
-# =========================================================
-# ENCODE LINK
-# =========================================================
-
-def encode_link(link):
-
-    encoded = base64.urlsafe_b64encode(
-        link.encode()
-    ).decode()
-
-    return encoded
-
-def decode_link(encoded):
-
-    decoded = base64.urlsafe_b64decode(
-        encoded.encode()
-    ).decode()
-
-    return decoded
 
 # =========================================================
 # SEND POST
@@ -274,7 +288,9 @@ def send_post(
     stream_url
 ):
 
-    encoded = encode_link(stream_url)
+    encoded = encode_link(
+        stream_url
+    )
 
     deep_link = (
         f"https://t.me/"
@@ -298,7 +314,7 @@ def send_post(
 
     try:
 
-        # PHOTO POST
+        # PHOTO
         if logo:
 
             requests.post(
@@ -312,7 +328,7 @@ def send_post(
                 timeout=30
             )
 
-        # TEXT POST
+        # TEXT
         else:
 
             requests.post(
@@ -330,24 +346,15 @@ def send_post(
         print("POST ERROR:", e)
 
 # =========================================================
-# FORCE JOIN
+# FORCE JOIN SECURITY
 # =========================================================
 
-async def check_force_join(
-    update,
+async def is_user_joined(
+    user_id,
     context
 ):
 
-    user_id = update.effective_user.id
-
-    not_joined = []
-
     for channel in FORCE_CHANNELS:
-
-        channel = channel.strip()
-
-        if not channel:
-            continue
 
         try:
 
@@ -356,47 +363,50 @@ async def check_force_join(
                 user_id
             )
 
-            if member.status in [
-                "left",
-                "kicked"
+            # MUST be member/admin/creator
+            if member.status not in [
+                "member",
+                "administrator",
+                "creator"
             ]:
-                not_joined.append(channel)
+                return False
 
-        except:
-            not_joined.append(channel)
+        except Exception as e:
 
-    if not_joined:
+            print(
+                "JOIN CHECK ERROR:",
+                e
+            )
 
-        buttons = []
+            return False
 
-        for ch in not_joined:
+    return True
 
-            buttons.append([
-                InlineKeyboardButton(
-                    f"Join {ch}",
-                    url=f"https://t.me/{ch.replace('@', '')}"
-                )
-            ])
+# =========================================================
+# JOIN BUTTONS
+# =========================================================
+
+def get_join_keyboard():
+
+    buttons = []
+
+    for ch in FORCE_CHANNELS:
 
         buttons.append([
             InlineKeyboardButton(
-                "✅ Joined",
-                callback_data="check_join"
+                f"Join {ch}",
+                url=f"https://t.me/{ch.replace('@', '')}"
             )
         ])
 
-        keyboard = InlineKeyboardMarkup(
-            buttons
+    buttons.append([
+        InlineKeyboardButton(
+            "✅ Joined",
+            callback_data="check_join"
         )
+    ])
 
-        await update.message.reply_text(
-            "❌ Join All Channels First",
-            reply_markup=keyboard
-        )
-
-        return False
-
-    return True
+    return InlineKeyboardMarkup(buttons)
 
 # =========================================================
 # CALLBACK
@@ -411,9 +421,25 @@ async def button_callback(
 
     await query.answer()
 
-    await query.message.reply_text(
-        "✅ Verification Complete"
+    user_id = query.from_user.id
+
+    joined = await is_user_joined(
+        user_id,
+        context
     )
+
+    if joined:
+
+        await query.message.reply_text(
+            "✅ Verification Complete\nNow click WATCH STREAM again."
+        )
+
+    else:
+
+        await query.message.reply_text(
+            "❌ Join all required channels first.",
+            reply_markup=get_join_keyboard()
+        )
 
 # =========================================================
 # START
@@ -424,17 +450,27 @@ async def start(
     context: ContextTypes.DEFAULT_TYPE
 ):
 
-    ok = await check_force_join(
-        update,
-        context
-    )
-
-    if not ok:
-        return
-
     user_id = update.effective_user.id
 
     save_user(user_id)
+
+    # =====================================================
+    # FORCE JOIN SECURITY
+    # =====================================================
+
+    joined = await is_user_joined(
+        user_id,
+        context
+    )
+
+    if not joined:
+
+        await update.message.reply_text(
+            "❌ You must join all channels first.",
+            reply_markup=get_join_keyboard()
+        )
+
+        return
 
     # =====================================================
     # STREAM ACCESS
@@ -471,7 +507,7 @@ async def start(
             return
 
     # =====================================================
-    # ADMIN
+    # ADMIN PANEL
     # =====================================================
 
     if user_id == ADMIN_ID:
@@ -480,10 +516,6 @@ async def start(
             "✅ Admin Panel",
             reply_markup=admin_keyboard
         )
-
-    # =====================================================
-    # USER
-    # =====================================================
 
     else:
 
@@ -547,10 +579,12 @@ def checker():
                         ""
                     )
 
-                    old = posted.get(title)
+                    old_link = posted.get(
+                        title
+                    )
 
-                    # NEW STREAM
-                    if not old:
+                    # NEW
+                    if not old_link:
 
                         send_post(
                             title,
@@ -559,7 +593,9 @@ def checker():
                             stream_url
                         )
 
-                        posted[title] = stream_url
+                        posted[title] = (
+                            stream_url
+                        )
 
                         save_posted(posted)
 
@@ -568,8 +604,8 @@ def checker():
                             title
                         )
 
-                    # UPDATED STREAM
-                    elif old != stream_url:
+                    # UPDATED
+                    elif old_link != stream_url:
 
                         send_post(
                             title,
@@ -578,7 +614,9 @@ def checker():
                             stream_url
                         )
 
-                        posted[title] = stream_url
+                        posted[title] = (
+                            stream_url
+                        )
 
                         save_posted(posted)
 
@@ -588,6 +626,7 @@ def checker():
                         )
 
         except Exception as e:
+
             print(
                 "CHECKER ERROR:",
                 e
@@ -609,6 +648,10 @@ async def messages(
     text = update.message.text.strip()
 
     save_user(user_id)
+
+    # =====================================================
+    # ADMIN ONLY
+    # =====================================================
 
     if user_id != ADMIN_ID:
         return
@@ -709,7 +752,9 @@ async def messages(
 
     if text == "📢 Broadcast":
 
-        waiting_broadcast.add(user_id)
+        waiting_broadcast.add(
+            user_id
+        )
 
         await update.message.reply_text(
             "Send Broadcast Message"
@@ -737,7 +782,9 @@ async def messages(
             except:
                 pass
 
-        waiting_broadcast.remove(user_id)
+        waiting_broadcast.remove(
+            user_id
+        )
 
         await update.message.reply_text(
             f"✅ Broadcast Sent: {sent}"
