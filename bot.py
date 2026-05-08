@@ -2,7 +2,6 @@ import os
 import re
 import time
 import json
-import base64
 import threading
 import requests
 
@@ -178,22 +177,6 @@ def save_posted(data):
         json.dump(data, f, indent=4)
 
 # =========================================================
-# ENCODE / DECODE
-# =========================================================
-
-def encode_link(link):
-
-    return base64.urlsafe_b64encode(
-        link.encode()
-    ).decode()
-
-def decode_link(data):
-
-    return base64.urlsafe_b64decode(
-        data.encode()
-    ).decode()
-
-# =========================================================
 # FETCH URL
 # =========================================================
 
@@ -288,14 +271,10 @@ def send_post(
     stream_url
 ):
 
-    encoded = encode_link(
-        stream_url
-    )
-
     deep_link = (
         f"https://t.me/"
         f"{BOT_USERNAME}"
-        f"?start={encoded}"
+        f"?start={stream_url}"
     )
 
     text = f"""
@@ -363,7 +342,6 @@ async def is_user_joined(
                 user_id
             )
 
-            # MUST be member/admin/creator
             if member.status not in [
                 "member",
                 "administrator",
@@ -371,13 +349,7 @@ async def is_user_joined(
             ]:
                 return False
 
-        except Exception as e:
-
-            print(
-                "JOIN CHECK ERROR:",
-                e
-            )
-
+        except:
             return False
 
     return True
@@ -454,10 +426,7 @@ async def start(
 
     save_user(user_id)
 
-    # =====================================================
-    # FORCE JOIN SECURITY
-    # =====================================================
-
+    # FORCE JOIN
     joined = await is_user_joined(
         user_id,
         context
@@ -472,18 +441,13 @@ async def start(
 
         return
 
-    # =====================================================
     # STREAM ACCESS
-    # =====================================================
-
     if context.args:
 
         try:
 
-            encoded = context.args[0]
-
-            stream_link = decode_link(
-                encoded
+            stream_link = " ".join(
+                context.args
             )
 
             await update.message.reply_text(
@@ -506,10 +470,7 @@ async def start(
 
             return
 
-    # =====================================================
-    # ADMIN PANEL
-    # =====================================================
-
+    # ADMIN
     if user_id == ADMIN_ID:
 
         await update.message.reply_text(
@@ -517,6 +478,7 @@ async def start(
             reply_markup=admin_keyboard
         )
 
+    # USER
     else:
 
         await update.message.reply_text(
@@ -649,17 +611,11 @@ async def messages(
 
     save_user(user_id)
 
-    # =====================================================
     # ADMIN ONLY
-    # =====================================================
-
     if user_id != ADMIN_ID:
         return
 
-    # =====================================================
     # ADD LINK
-    # =====================================================
-
     if text == "➕ Add Link":
 
         waiting_add.add(user_id)
@@ -682,10 +638,7 @@ async def messages(
 
         return
 
-    # =====================================================
     # DELETE LINK
-    # =====================================================
-
     if text == "➖ Delete Link":
 
         waiting_delete.add(user_id)
@@ -708,10 +661,7 @@ async def messages(
 
         return
 
-    # =====================================================
     # ALL LINKS
-    # =====================================================
-
     if text == "📃 All Links":
 
         links = get_links()
@@ -724,18 +674,13 @@ async def messages(
 
         else:
 
-            msg = "\n\n".join(links)
-
             await update.message.reply_text(
-                msg
+                "\n\n".join(links)
             )
 
         return
 
-    # =====================================================
     # USERS
-    # =====================================================
-
     if text == "👥 Total Users":
 
         total = len(get_users())
@@ -746,15 +691,10 @@ async def messages(
 
         return
 
-    # =====================================================
     # BROADCAST
-    # =====================================================
-
     if text == "📢 Broadcast":
 
-        waiting_broadcast.add(
-            user_id
-        )
+        waiting_broadcast.add(user_id)
 
         await update.message.reply_text(
             "Send Broadcast Message"
@@ -782,9 +722,7 @@ async def messages(
             except:
                 pass
 
-        waiting_broadcast.remove(
-            user_id
-        )
+        waiting_broadcast.remove(user_id)
 
         await update.message.reply_text(
             f"✅ Broadcast Sent: {sent}"
@@ -792,10 +730,7 @@ async def messages(
 
         return
 
-    # =====================================================
     # FORCE CHECK
-    # =====================================================
-
     if text == "🔄 Force Check":
 
         threading.Thread(
