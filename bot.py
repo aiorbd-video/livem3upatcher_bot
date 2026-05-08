@@ -1,6 +1,8 @@
 import os
 import re
 import time
+import json
+import base64
 import threading
 import urllib.parse
 import requests
@@ -36,11 +38,32 @@ FORCE_CHANNELS = os.getenv(
     ""
 ).split(",")
 
-CHECK_TIME = 300
+CHECK_TIME = int(
+    os.getenv("CHECK_TIME", "300")
+)
+
+# =========================================================
+# FILES
+# =========================================================
 
 LINKS_FILE = "links.txt"
 USERS_FILE = "users.txt"
-POSTED_FILE = "posted.txt"
+POSTED_FILE = "posted.json"
+
+# =========================================================
+# CREATE FILES
+# =========================================================
+
+for file in [
+    LINKS_FILE,
+    USERS_FILE
+]:
+    if not os.path.exists(file):
+        open(file, "w").close()
+
+if not os.path.exists(POSTED_FILE):
+    with open(POSTED_FILE, "w") as f:
+        json.dump({}, f)
 
 # =========================================================
 # REQUEST SESSION
@@ -59,19 +82,6 @@ HEADERS = {
     "Accept": "*/*",
     "Connection": "keep-alive"
 }
-
-# =========================================================
-# CREATE FILES
-# =========================================================
-
-for file in [
-    LINKS_FILE,
-    USERS_FILE,
-    POSTED_FILE
-]:
-
-    if not os.path.exists(file):
-        open(file, "w").close()
 
 # =========================================================
 # MEMORY
@@ -98,38 +108,21 @@ admin_keyboard = ReplyKeyboardMarkup(
 # FILE FUNCTIONS
 # =========================================================
 
-def get_posted():
+def get_users():
 
-    with open(POSTED_FILE, "r") as f:
-        return set(
-            f.read().splitlines()
-        )
-
-def save_posted(link):
-
-    posted = get_posted()
-
-    if link not in posted:
-
-        with open(POSTED_FILE, "a") as f:
-            f.write(link + "\n")
+    with open(USERS_FILE, "r") as f:
+        return f.read().splitlines()
 
 def save_user(user_id):
 
     user_id = str(user_id)
 
-    with open(USERS_FILE, "r") as f:
-        users = f.read().splitlines()
+    users = get_users()
 
     if user_id not in users:
 
         with open(USERS_FILE, "a") as f:
             f.write(user_id + "\n")
-
-def get_users():
-
-    with open(USERS_FILE, "r") as f:
-        return f.read().splitlines()
 
 def get_links():
 
@@ -162,6 +155,20 @@ def delete_link(link):
 
             for l in links:
                 f.write(l + "\n")
+
+# =========================================================
+# POSTED DATABASE
+# =========================================================
+
+def get_posted():
+
+    with open(POSTED_FILE, "r") as f:
+        return json.load(f)
+
+def save_posted(data):
+
+    with open(POSTED_FILE, "w") as f:
+        json.dump(data, f, indent=4)
 
 # =========================================================
 # FETCH URL
@@ -202,12 +209,15 @@ def parse_m3u(content):
 
         line = line.strip()
 
-        # EXTINF
         if line.startswith("#EXTINF"):
 
             current = {}
 
-            # LOGO
+            # title
+            if "," in line:
+                current["title"] = line.split(",")[-1].strip()
+
+            # logo
             logo_match = re.search(
                 r'tvg-logo="([^"]+)"',
                 line
@@ -216,7 +226,7 @@ def parse_m3u(content):
             if logo_match:
                 current["logo"] = logo_match.group(1)
 
-            # GROUP
+            # group
             group_match = re.search(
                 r'group-title="([^"]+)"',
                 line
@@ -225,14 +235,6 @@ def parse_m3u(content):
             if group_match:
                 current["group"] = group_match.group(1)
 
-            # TITLE
-            if "," in line:
-
-                title = line.split(",")[-1].strip()
-
-                current["title"] = title
-
-        # STREAM
         elif ".m3u8" in line:
 
             current["url"] = line.strip()
@@ -240,6 +242,26 @@ def parse_m3u(content):
             channels.append(current)
 
     return channels
+
+# =========================================================
+# ENCODE LINK
+# =========================================================
+
+def encode_link(link):
+
+    encoded = base64.urlsafe_b64encode(
+        link.encode()
+    ).decode()
+
+    return encoded
+
+def decode_link(encoded):
+
+    decoded = base64.urlsafe_b64decode(
+        encoded.encode()
+    ).decode()
+
+    return decoded
 
 # =========================================================
 # SEND POST
@@ -252,10 +274,7 @@ def send_post(
     stream_url
 ):
 
-    encoded = urllib.parse.quote(
-        stream_url,
-        safe=""
-    )
+    encoded = encode_link(stream_url)
 
     deep_link = (
         f"https://t.me/"
@@ -279,7 +298,7 @@ def send_post(
 
     try:
 
-        # PHOTO
+        # PHOTO POST
         if logo:
 
             requests.post(
@@ -293,7 +312,7 @@ def send_post(
                 timeout=30
             )
 
-        # TEXT
+        # TEXT POST
         else:
 
             requests.post(
@@ -325,13 +344,15 @@ async def check_force_join(
 
     for channel in FORCE_CHANNELS:
 
+        channel = channel.strip()
+
         if not channel:
             continue
 
         try:
 
             member = await context.bot.get_chat_member(
-                channel.strip(),
+                channel,
                 user_id
             )
 
@@ -353,7 +374,7 @@ async def check_force_join(
             buttons.append([
                 InlineKeyboardButton(
                     f"Join {ch}",
-                    url=f"https://t.me/{ch.replace('@', '').strip()}"
+                    url=f"https://t.me/{ch.replace('@', '')}"
                 )
             ])
 
@@ -390,42 +411,84 @@ async def button_callback(
 
     await query.answer()
 
-    user_id = query.from_user.id
+    await query.message.reply_text(
+        "✅ Verification Complete"
+    )
 
-    not_joined = []
+# =========================================================
+# START
+# =========================================================
 
-    for channel in FORCE_CHANNELS:
+async def start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
-        if not channel:
-            continue
+    ok = await check_force_join(
+        update,
+        context
+    )
+
+    if not ok:
+        return
+
+    user_id = update.effective_user.id
+
+    save_user(user_id)
+
+    # =====================================================
+    # STREAM ACCESS
+    # =====================================================
+
+    if context.args:
 
         try:
 
-            member = await context.bot.get_chat_member(
-                channel.strip(),
-                user_id
+            encoded = context.args[0]
+
+            stream_link = decode_link(
+                encoded
             )
 
-            if member.status in [
-                "left",
-                "kicked"
-            ]:
-                not_joined.append(channel)
+            await update.message.reply_text(
+                f"""
+✅ Stream Access Granted
 
-        except:
-            not_joined.append(channel)
+🔗 M3U8 STREAM:
 
-    if not not_joined:
+{stream_link}
+"""
+            )
 
-        await query.message.reply_text(
-            "✅ Access Granted"
+            return
+
+        except Exception as e:
+
+            await update.message.reply_text(
+                f"ERROR:\n{e}"
+            )
+
+            return
+
+    # =====================================================
+    # ADMIN
+    # =====================================================
+
+    if user_id == ADMIN_ID:
+
+        await update.message.reply_text(
+            "✅ Admin Panel",
+            reply_markup=admin_keyboard
         )
+
+    # =====================================================
+    # USER
+    # =====================================================
 
     else:
 
-        await query.answer(
-            "Join all channels first",
-            show_alert=True
+        await update.message.reply_text(
+            "✅ Bot Access Granted"
         )
 
 # =========================================================
@@ -438,9 +501,9 @@ def checker():
 
         try:
 
-            links = get_links()
-
             posted = get_posted()
+
+            links = get_links()
 
             for m3u_url in links:
 
@@ -469,9 +532,6 @@ def checker():
                     if not stream_url:
                         continue
 
-                    if stream_url in posted:
-                        continue
-
                     title = item.get(
                         "title",
                         "Unknown Stream"
@@ -487,21 +547,45 @@ def checker():
                         ""
                     )
 
-                    send_post(
-                        title,
-                        category,
-                        logo,
-                        stream_url
-                    )
+                    old = posted.get(title)
 
-                    save_posted(
-                        stream_url
-                    )
+                    # NEW STREAM
+                    if not old:
 
-                    print(
-                        "POSTED:",
-                        title
-                    )
+                        send_post(
+                            title,
+                            category,
+                            logo,
+                            stream_url
+                        )
+
+                        posted[title] = stream_url
+
+                        save_posted(posted)
+
+                        print(
+                            "NEW:",
+                            title
+                        )
+
+                    # UPDATED STREAM
+                    elif old != stream_url:
+
+                        send_post(
+                            title,
+                            category,
+                            logo,
+                            stream_url
+                        )
+
+                        posted[title] = stream_url
+
+                        save_posted(posted)
+
+                        print(
+                            "UPDATED:",
+                            title
+                        )
 
         except Exception as e:
             print(
@@ -510,63 +594,6 @@ def checker():
             )
 
         time.sleep(CHECK_TIME)
-
-# =========================================================
-# START
-# =========================================================
-
-async def start(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    ok = await check_force_join(
-        update,
-        context
-    )
-
-    if not ok:
-        return
-
-    user_id = update.effective_user.id
-
-    save_user(user_id)
-
-    args = context.args
-
-    # STREAM ACCESS
-    if args:
-
-        stream_link = urllib.parse.unquote(
-            args[0]
-        )
-
-        await update.message.reply_text(
-            f"""
-✅ Stream Access Granted
-
-🔗 M3U8 STREAM:
-
-{stream_link}
-"""
-        )
-
-        return
-
-    # ADMIN
-    if user_id == ADMIN_ID:
-
-        await update.message.reply_text(
-            "✅ Admin Panel",
-            reply_markup=admin_keyboard
-        )
-
-    # USER
-    else:
-
-        await update.message.reply_text(
-            "✅ Bot Access Granted"
-        )
 
 # =========================================================
 # MESSAGE HANDLER
@@ -578,6 +605,7 @@ async def messages(
 ):
 
     user_id = update.effective_user.id
+
     text = update.message.text.strip()
 
     save_user(user_id)
@@ -585,13 +613,13 @@ async def messages(
     if user_id != ADMIN_ID:
         return
 
+    # =====================================================
     # ADD LINK
+    # =====================================================
 
     if text == "➕ Add Link":
 
-        waiting_add.add(
-            user_id
-        )
+        waiting_add.add(user_id)
 
         await update.message.reply_text(
             "Send M3U URL"
@@ -603,9 +631,7 @@ async def messages(
 
         save_link(text)
 
-        waiting_add.remove(
-            user_id
-        )
+        waiting_add.remove(user_id)
 
         await update.message.reply_text(
             "✅ M3U Added"
@@ -613,13 +639,13 @@ async def messages(
 
         return
 
+    # =====================================================
     # DELETE LINK
+    # =====================================================
 
     if text == "➖ Delete Link":
 
-        waiting_delete.add(
-            user_id
-        )
+        waiting_delete.add(user_id)
 
         await update.message.reply_text(
             "Send Exact M3U URL"
@@ -631,9 +657,7 @@ async def messages(
 
         delete_link(text)
 
-        waiting_delete.remove(
-            user_id
-        )
+        waiting_delete.remove(user_id)
 
         await update.message.reply_text(
             "✅ Link Deleted"
@@ -641,7 +665,9 @@ async def messages(
 
         return
 
+    # =====================================================
     # ALL LINKS
+    # =====================================================
 
     if text == "📃 All Links":
 
@@ -655,9 +681,7 @@ async def messages(
 
         else:
 
-            msg = "\n\n".join(
-                links
-            )
+            msg = "\n\n".join(links)
 
             await update.message.reply_text(
                 msg
@@ -665,13 +689,13 @@ async def messages(
 
         return
 
+    # =====================================================
     # USERS
+    # =====================================================
 
     if text == "👥 Total Users":
 
-        total = len(
-            get_users()
-        )
+        total = len(get_users())
 
         await update.message.reply_text(
             f"👥 Total Users: {total}"
@@ -679,13 +703,13 @@ async def messages(
 
         return
 
+    # =====================================================
     # BROADCAST
+    # =====================================================
 
     if text == "📢 Broadcast":
 
-        waiting_broadcast.add(
-            user_id
-        )
+        waiting_broadcast.add(user_id)
 
         await update.message.reply_text(
             "Send Broadcast Message"
@@ -713,9 +737,7 @@ async def messages(
             except:
                 pass
 
-        waiting_broadcast.remove(
-            user_id
-        )
+        waiting_broadcast.remove(user_id)
 
         await update.message.reply_text(
             f"✅ Broadcast Sent: {sent}"
@@ -723,7 +745,9 @@ async def messages(
 
         return
 
+    # =====================================================
     # FORCE CHECK
+    # =====================================================
 
     if text == "🔄 Force Check":
 
