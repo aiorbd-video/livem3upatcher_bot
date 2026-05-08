@@ -4,6 +4,7 @@ import time
 import json
 import threading
 import requests
+import urllib.parse
 
 from telegram import (
     Update,
@@ -252,7 +253,7 @@ def parse_m3u(content):
                 )
 
         # STREAM
-        elif ".m3u8" in line:
+        elif line.startswith("http") and ".m3u8" in line:
 
             current["url"] = line.strip()
 
@@ -271,10 +272,14 @@ def send_post(
     stream_url
 ):
 
+    encoded_link = urllib.parse.quote_plus(
+        stream_url
+    )
+
     deep_link = (
         f"https://t.me/"
         f"{BOT_USERNAME}"
-        f"?start={stream_url}"
+        f"?start={encoded_link}"
     )
 
     text = f"""
@@ -446,8 +451,8 @@ async def start(
 
         try:
 
-            stream_link = " ".join(
-                context.args
+            stream_link = urllib.parse.unquote_plus(
+                " ".join(context.args)
             )
 
             await update.message.reply_text(
@@ -486,6 +491,113 @@ async def start(
         )
 
 # =========================================================
+# CHECK STREAMS
+# =========================================================
+
+def check_streams():
+
+    try:
+
+        posted = get_posted()
+
+        links = get_links()
+
+        for m3u_url in links:
+
+            print(
+                "CHECKING:",
+                m3u_url
+            )
+
+            content = fetch_url(
+                m3u_url
+            )
+
+            if not content:
+                continue
+
+            streams = parse_m3u(
+                content
+            )
+
+            for item in streams:
+
+                stream_url = item.get(
+                    "url"
+                )
+
+                if not stream_url:
+                    continue
+
+                title = item.get(
+                    "title",
+                    "Unknown Stream"
+                )
+
+                category = item.get(
+                    "group",
+                    "Live TV"
+                )
+
+                logo = item.get(
+                    "logo",
+                    ""
+                )
+
+                old_link = posted.get(
+                    title
+                )
+
+                # NEW
+                if not old_link:
+
+                    send_post(
+                        title,
+                        category,
+                        logo,
+                        stream_url
+                    )
+
+                    posted[title] = (
+                        stream_url
+                    )
+
+                    save_posted(posted)
+
+                    print(
+                        "NEW:",
+                        title
+                    )
+
+                # UPDATED
+                elif old_link != stream_url:
+
+                    send_post(
+                        title,
+                        category,
+                        logo,
+                        stream_url
+                    )
+
+                    posted[title] = (
+                        stream_url
+                    )
+
+                    save_posted(posted)
+
+                    print(
+                        "UPDATED:",
+                        title
+                    )
+
+    except Exception as e:
+
+        print(
+            "CHECK ERROR:",
+            e
+        )
+
+# =========================================================
 # AUTO CHECKER
 # =========================================================
 
@@ -493,106 +605,7 @@ def checker():
 
     while True:
 
-        try:
-
-            posted = get_posted()
-
-            links = get_links()
-
-            for m3u_url in links:
-
-                print(
-                    "CHECKING:",
-                    m3u_url
-                )
-
-                content = fetch_url(
-                    m3u_url
-                )
-
-                if not content:
-                    continue
-
-                streams = parse_m3u(
-                    content
-                )
-
-                for item in streams:
-
-                    stream_url = item.get(
-                        "url"
-                    )
-
-                    if not stream_url:
-                        continue
-
-                    title = item.get(
-                        "title",
-                        "Unknown Stream"
-                    )
-
-                    category = item.get(
-                        "group",
-                        "Live TV"
-                    )
-
-                    logo = item.get(
-                        "logo",
-                        ""
-                    )
-
-                    old_link = posted.get(
-                        title
-                    )
-
-                    # NEW
-                    if not old_link:
-
-                        send_post(
-                            title,
-                            category,
-                            logo,
-                            stream_url
-                        )
-
-                        posted[title] = (
-                            stream_url
-                        )
-
-                        save_posted(posted)
-
-                        print(
-                            "NEW:",
-                            title
-                        )
-
-                    # UPDATED
-                    elif old_link != stream_url:
-
-                        send_post(
-                            title,
-                            category,
-                            logo,
-                            stream_url
-                        )
-
-                        posted[title] = (
-                            stream_url
-                        )
-
-                        save_posted(posted)
-
-                        print(
-                            "UPDATED:",
-                            title
-                        )
-
-        except Exception as e:
-
-            print(
-                "CHECKER ERROR:",
-                e
-            )
+        check_streams()
 
         time.sleep(CHECK_TIME)
 
@@ -733,13 +746,14 @@ async def messages(
     # FORCE CHECK
     if text == "🔄 Force Check":
 
-        threading.Thread(
-            target=checker,
-            daemon=True
-        ).start()
+        await update.message.reply_text(
+            "🔍 Force checking..."
+        )
+
+        check_streams()
 
         await update.message.reply_text(
-            "✅ Force Check Started"
+            "✅ Force Check Complete"
         )
 
 # =========================================================
