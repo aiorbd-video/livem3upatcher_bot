@@ -1,9 +1,11 @@
 import os
 import re
+import time
 import hashlib
 import logging
 import asyncio
 import aiohttp
+from datetime import datetime, timedelta
 from motor.motor_asyncio import AsyncIOMotorClient
 
 from telegram import (
@@ -20,6 +22,13 @@ from telegram.ext import (
     ContextTypes,
     filters
 )
+from telegram.error import RetryAfter
+
+try:
+    import psutil
+    HAS_PSUTIL = True
+except ImportError:
+    HAS_PSUTIL = False
 
 # =========================================================
 # PRO LOGGING SETUP
@@ -39,16 +48,16 @@ BOT_USERNAME = os.getenv("BOT_USERNAME")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 MONGO_URI = os.getenv("MONGO_URI")
 
-FORCE_CHANNELS = [
-    x.strip() for x in os.getenv("FORCE_CHANNELS", "").split(",") if x.strip()
-]
+FORCE_CHANNELS = [x.strip() for x in os.getenv("FORCE_CHANNELS", "").split(",") if x.strip()]
 CHECK_TIME = int(os.getenv("CHECK_TIME", "300"))
-DELETE_TIME = 300  # ৫ মিনিট (৩০০ সেকেন্ড)
+DELETE_TIME = 300  # ৫ মিনিট
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     "Accept": "*/*"
 }
+
+START_TIME = time.time()
 
 # =========================================================
 # MONGODB SETUP
@@ -66,55 +75,74 @@ stats_col = db["app_stats"]
 # DATABASE FUNCTIONS
 # =========================================================
 async def add_user(user_id: int):
-    await users_col.update_one({"user_id": user_id}, {"$set": {"user_id": user_id}}, upsert=True)
+    await users_col.update_one(
+        {"user_id": user_id}, 
+        {"$setOnInsert": {"user_id": user_id, "joined_at": datetime.utcnow(), "is_banned": False}}, 
+        upsert=True
+    )
 
 async def get_all_users():
-    return [doc["user_id"] async for doc in users_col.find({})]
+    return [doc["user_id"] async for doc in users_col.find({"is_banned": {"$ne": True}})]
+
+async def is_user_banned(user_id: int):
+    user = await users_col.find_one({"user_id": user_id})
+    return user.get("is_banned", False) if user else False
+
+async def toggle_ban_user(user_id: int, ban_status: bool):
+    result = await users_col.update_one({"user_id": user_id}, {"$set": {"is_banned": ban_status}})
+    return result.modified_count > 0
 
 async def add_m3u_source(url: str):
-    await sources_col.update_one({"url": url}, {"$set": {"url": url}}, upsert=True)
+    await sources_col.update_one(
+        {"url": url}, 
+        {"$set": {"url": url, "added_at": datetime.utcnow()}}, 
+        upsert=True
+    )
 
 async def remove_m3u_source(url: str):
     await sources_col.delete_one({"url": url})
+    deleted_streams = await posted_col.delete_many({"source_url": url})
+    deleted_links = await links_col.delete_many({"source_url": url})
+    return deleted_streams.deleted_count, deleted_links.deleted_count
 
 async def get_m3u_sources():
     return [doc["url"] async for doc in sources_col.find({})]
 
 async def is_stream_posted(stream_url: str):
-    result = await posted_col.find_one({"stream_url": stream_url})
-    return result is not None
+    return await posted_col.find_one({"stream_url": stream_url}) is not None
 
-async def save_posted_stream(stream_url: str, title: str):
+async def save_posted_stream(stream_url: str, title: str, source_url: str, message_id: int):
     await posted_col.update_one(
         {"stream_url": stream_url}, 
-        {"$set": {"title": title, "stream_url": stream_url}}, 
+        {"$set": {
+            "title": title, 
+            "stream_url": stream_url, 
+            "source_url": source_url,
+            "message_id": message_id,
+            "posted_at": datetime.utcnow()
+        }}, 
         upsert=True
     )
     await stats_col.update_one({"stat_name": "total_posted"}, {"$inc": {"count": 1}}, upsert=True)
 
-async def create_short_link(stream_url: str, referer: str, origin: str):
-    short_id = hashlib.md5(stream_url.encode()).hexdigest()[:12]
+async def create_short_link(stream_url: str, referer: str, origin: str, source_url: str):
+    short_id = hashlib.md5((stream_url + str(time.time())).encode()).hexdigest()[:12]
     await links_col.update_one(
         {"short_id": short_id}, 
         {"$set": {
             "short_id": short_id, 
             "stream_url": stream_url,
             "referer": referer,
-            "origin": origin
+            "origin": origin,
+            "source_url": source_url,
+            "created_at": datetime.utcnow()
         }}, 
         upsert=True
     )
     return short_id
 
 async def get_stream_data(short_id: str):
-    doc = await links_col.find_one({"short_id": short_id})
-    if doc:
-        return {
-            "stream_url": doc.get("stream_url", ""),
-            "referer": doc.get("referer", ""),
-            "origin": doc.get("origin", "")
-        }
-    return None
+    return await links_col.find_one({"short_id": short_id})
 
 async def track_click():
     await stats_col.update_one({"stat_name": "total_clicks"}, {"$inc": {"count": 1}}, upsert=True)
@@ -125,22 +153,36 @@ async def get_stats():
     return (posted["count"] if posted else 0), (clicks["count"] if clicks else 0)
 
 # =========================================================
-# ADMIN MENU
+# REAL-TIME SYNC & EXPIRE SYSTEM
 # =========================================================
-admin_state = {}
+async def remove_expired_streams(source_url: str, active_stream_urls: list, context: ContextTypes.DEFAULT_TYPE):
+    """M3U ফাইল থেকে রিমুভ হওয়া লিংকগুলো ডাটাবেস ও চ্যানেল থেকে মুছে ফেলবে"""
+    if not active_stream_urls:
+        return 0  # Safety: If fetch failed or list is empty, avoid mass deletion
 
-admin_keyboard = ReplyKeyboardMarkup(
-    [
-        ["➕ লিংক যুক্ত করুন", "➖ লিংক মুছুন"],
-        ["📃 সব লিংক", "👥 মোট ইউজার"],
-        ["📢 ব্রডকাস্ট", "📊 অ্যানালিটিক্স"],
-        ["🔄 ফোর্স চেক"]
-    ],
-    resize_keyboard=True
-)
+    db_streams = posted_col.find({"source_url": source_url})
+    expired_urls = []
+    
+    async for doc in db_streams:
+        if doc["stream_url"] not in active_stream_urls:
+            expired_urls.append(doc["stream_url"])
+            # Remove post from Telegram Channel
+            if doc.get("message_id"):
+                try:
+                    await context.bot.delete_message(chat_id=CHANNEL_ID, message_id=doc["message_id"])
+                except Exception as e:
+                    logger.warning(f"Could not delete message {doc['message_id']} from channel: {e}")
+
+    if expired_urls:
+        # Remove from Databases
+        await posted_col.delete_many({"stream_url": {"$in": expired_urls}})
+        await links_col.delete_many({"stream_url": {"$in": expired_urls}})
+        logger.info(f"Sync: Removed {len(expired_urls)} expired streams for {source_url}")
+        
+    return len(expired_urls)
 
 # =========================================================
-# SMART M3U PARSER (Extracts Referer & Origin)
+# SMART M3U PARSER
 # =========================================================
 async def fetch_m3u_content(url: str):
     try:
@@ -159,38 +201,26 @@ def parse_m3u_playlist(content: str):
 
     for line in lines:
         line = line.strip()
-        
-        # EXTINF Data
         if line.startswith("#EXTINF"):
             current_stream = {"title": "অজানা স্ট্রিম", "group": "লাইভ টিভি", "logo": "", "referer": "", "origin": ""}
-            if "," in line:
-                current_stream["title"] = line.split(",")[-1].strip()
-            
+            if "," in line: current_stream["title"] = line.split(",")[-1].strip()
             group_match = re.search(r'group-title="([^"]+)"', line)
             logo_match = re.search(r'tvg-logo="([^"]+)"', line)
-            
             if group_match: current_stream["group"] = group_match.group(1)
             if logo_match: current_stream["logo"] = logo_match.group(1)
 
-        # VLC Options (e.g. #EXTVLCOPT:http-referrer=...)
         elif line.startswith("#EXTVLCOPT:http-referrer="):
             current_stream["referer"] = line.split("=")[1].strip()
         elif line.startswith("#EXTVLCOPT:http-origin="):
             current_stream["origin"] = line.split("=")[1].strip()
 
-        # Stream Link + Inline Headers (e.g. |Referer=...)
         elif line.startswith("http") and (".m3u8" in line or ".ts" in line):
             raw_url = line
-            
-            # Pipe (|) syntax parse
             if "|" in raw_url:
                 parts = raw_url.split("|")
-                raw_url = parts[0]
-                headers_part = parts[1]
-                
+                raw_url, headers_part = parts[0], parts[1]
                 ref_match = re.search(r'Referer=([^&]+)', headers_part)
                 orig_match = re.search(r'Origin=([^&]+)', headers_part)
-                
                 if ref_match: current_stream["referer"] = ref_match.group(1)
                 if orig_match: current_stream["origin"] = orig_match.group(1)
 
@@ -207,27 +237,21 @@ async def is_user_joined(user_id: int, context: ContextTypes.DEFAULT_TYPE):
     for channel in FORCE_CHANNELS:
         try:
             member = await context.bot.get_chat_member(channel, user_id)
-            if member.status in ["left", "kicked"]:
-                return False
+            if member.status in ["left", "kicked"]: return False
         except Exception:
             return False
     return True
 
 def get_force_join_keyboard(payload=None):
-    buttons = []
-    for ch in FORCE_CHANNELS:
-        buttons.append([InlineKeyboardButton(f"✅ চ্যানেল এ যুক্ত হোন ({ch})", url=f"https://t.me/{ch.replace('@', '')}")])
-    
-    cb_data = f"check_join|{payload}" if payload else "check_join"
-    buttons.append([InlineKeyboardButton("🔄 জয়েন করেছি (চেক করুন)", callback_data=cb_data)])
+    buttons = [[InlineKeyboardButton(f"✅ চ্যানেল এ যুক্ত হোন ({ch})", url=f"https://t.me/{ch.replace('@', '')}")] for ch in FORCE_CHANNELS]
+    buttons.append([InlineKeyboardButton("🔄 জয়েন করেছি (চেক করুন)", callback_data=f"check_join|{payload}" if payload else "check_join")])
     return InlineKeyboardMarkup(buttons)
 
 # =========================================================
-# AUTO CHANNEL POSTING JOB
+# JOBS: AUTO POSTING & SYNC
 # =========================================================
-async def post_to_channel(context: ContextTypes.DEFAULT_TYPE, title, category, logo, stream_url, referer, origin):
-    # ডাটাবেসে লিংক, referer এবং origin সেভ করা হচ্ছে
-    short_id = await create_short_link(stream_url, referer, origin)
+async def post_to_channel(context, title, category, logo, stream_url, referer, origin, source_url):
+    short_id = await create_short_link(stream_url, referer, origin, source_url)
     deep_link = f"https://t.me/{BOT_USERNAME}?start={short_id}"
 
     text = (
@@ -238,15 +262,16 @@ async def post_to_channel(context: ContextTypes.DEFAULT_TYPE, title, category, l
         f"🔗 <a href='{deep_link}'>সরাসরি দেখতে এখানে ক্লিক করুন</a>\n\n"
         f"⚡ <i>All In One Reborn | Auto Updated Feed</i>"
     )
-
     try:
         if logo and logo.startswith("http"):
-            await context.bot.send_photo(chat_id=CHANNEL_ID, photo=logo, caption=text, parse_mode="HTML")
+            msg = await context.bot.send_photo(chat_id=CHANNEL_ID, photo=logo, caption=text, parse_mode="HTML")
         else:
-            await context.bot.send_message(chat_id=CHANNEL_ID, text=text, parse_mode="HTML", disable_web_page_preview=True)
-        await asyncio.sleep(1.5)
+            msg = await context.bot.send_message(chat_id=CHANNEL_ID, text=text, parse_mode="HTML", disable_web_page_preview=True)
+        await asyncio.sleep(2)
+        return msg.message_id
     except Exception as e:
         logger.error(f"Channel Post Error: {e}")
+        return None
 
 async def auto_checker_job(context: ContextTypes.DEFAULT_TYPE):
     sources = await get_m3u_sources()
@@ -255,205 +280,208 @@ async def auto_checker_job(context: ContextTypes.DEFAULT_TYPE):
         if not content: continue
 
         streams = parse_m3u_playlist(content)
+        active_urls = []
+
+        # 1. Post New Streams
         for item in streams:
             stream_url = item.get("url")
             if not stream_url: continue
+            
+            active_urls.append(stream_url)
 
-            if await is_stream_posted(stream_url):
+            if await is_stream_posted(stream_url): 
                 continue
 
-            await post_to_channel(
-                context, 
-                item["title"], 
-                item["group"], 
-                item["logo"], 
-                stream_url,
-                item["referer"],
-                item["origin"]
-            )
-            await save_posted_stream(stream_url, item["title"])
+            msg_id = await post_to_channel(context, item["title"], item["group"], item["logo"], stream_url, item["referer"], item["origin"], source)
+            if msg_id:
+                await save_posted_stream(stream_url, item["title"], source, msg_id)
 
-# =========================================================
-# AUTO DELETE LINK JOB (Anti-Theft System)
-# =========================================================
+        # 2. Sync & Expire Removed Streams (If active_urls is valid)
+        if len(active_urls) > 0:
+            await remove_expired_streams(source, active_urls, context)
+
 async def delete_link_message(context: ContextTypes.DEFAULT_TYPE):
     job_data = context.job.data
-    chat_id = job_data["chat_id"]
-    message_id = job_data["message_id"]
-
     try:
-        await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
-        
-        warning_text = (
-            "⚠️ <b>মেয়াদ উত্তীর্ণ:</b>\n\n"
-            "সিকিউরিটির জন্য আপনার লিংকের মেয়াদ শেষ হয়ে গেছে। "
-            "ভিডিও পুনরায় দেখতে চাইলে চ্যানেল থেকে আবার লিংকে ক্লিক করুন।"
-        )
-        await context.bot.send_message(chat_id=chat_id, text=warning_text, parse_mode="HTML")
-    except Exception as e:
-        logger.error(f"Failed to auto-delete message: {e}")
+        await context.bot.delete_message(chat_id=job_data["chat_id"], message_id=job_data["message_id"])
+        warning_text = "⚠️ <b>মেয়াদ উত্তীর্ণ:</b>\nসিকিউরিটির জন্য আপনার লিংকের মেয়াদ শেষ হয়ে গেছে। ভিডিও পুনরায় দেখতে চাইলে চ্যানেল থেকে আবার লিংকে ক্লিক করুন।"
+        await context.bot.send_message(chat_id=job_data["chat_id"], text=warning_text, parse_mode="HTML")
+    except Exception:
+        pass
 
 # =========================================================
-# BOT HANDLERS (User Friendly UI)
+# BOT HANDLERS & ADMIN MENU
 # =========================================================
+admin_state = {}
+admin_keyboard = ReplyKeyboardMarkup([
+    ["➕ লিংক যুক্ত করুন", "➖ লিংক মুছুন"],
+    ["📃 সব লিংক", "👥 মোট ইউজার"],
+    ["📢 ব্রডকাস্ট", "📊 অ্যানালিটিক্স"],
+    ["🚫 ইউজার ব্যান", "⚙️ সিস্টেম স্ট্যাটাস"],
+    ["🔄 ফোর্স চেক"]
+], resize_keyboard=True)
+
+def get_sys_status():
+    uptime = str(timedelta(seconds=int(time.time() - START_TIME)))
+    if HAS_PSUTIL:
+        ram = psutil.virtual_memory().percent
+        cpu = psutil.cpu_percent()
+        return f"⏱ <b>Uptime:</b> {uptime}\n💽 <b>RAM Usage:</b> {ram}%\n⚙️ <b>CPU Usage:</b> {cpu}%"
+    return f"⏱ <b>Uptime:</b> {uptime}\n⚠️ <i>Install 'psutil' for RAM/CPU stats.</i>"
+
 async def send_stream_message(context, chat_id, data, message_to_edit=None):
-    stream_url = data["stream_url"]
-    referer = data["referer"]
-    origin = data["origin"]
-
-    # User friendly clean UI
-    msg_text = f"✅ <b>স্ট্রিম অ্যাক্সেস অনুমোদিত!</b>\n\n🔗 <b>আপনার প্লেব্যাক লিংক:</b>\n<code>{stream_url}</code>\n"
-    
-    if referer:
-        msg_text += f"\n🌐 <b>Referer:</b>\n<code>{referer}</code>"
-    if origin:
-        msg_text += f"\n🌍 <b>Origin:</b>\n<code>{origin}</code>"
+    msg_text = f"✅ <b>স্ট্রিম অ্যাক্সেস অনুমোদিত!</b>\n\n🔗 <b>আপনার প্লেব্যাক লিংক:</b>\n<code>{data['stream_url']}</code>\n"
+    if data.get("referer"): msg_text += f"\n🌐 <b>Referer:</b>\n<code>{data['referer']}</code>"
+    if data.get("origin"): msg_text += f"\n🌍 <b>Origin:</b>\n<code>{data['origin']}</code>"
         
-    msg_text += "\n\n<i>(যেকোনো কাস্টম প্লেয়ার বা NS Player অ্যাপে এটি প্লে করতে পারবেন) reffer ও origin ও custom user agent থাকলে আপনাকে NS player এ সব ঠিকভাবে বসাতে হবে তবেই ভিডিও চলবে। This Bot is Developed by Ratul. join my tg channel @allonebd @bdvpnfile @itsmeratul. subscribe my youtube channel https://youtube.com/itsmeratulfti</i>\n\n⏳ <b>বিঃদ্রঃ</b> ৫ মিনিট পর মেসেজটি ডিলিট হয়ে যাবে।"
+    msg_text += "\n\n<i>(যেকোনো কাস্টম প্লেয়ার বা NS Player অ্যাপে এটি প্লে করতে পারবেন)। This Bot is Developed by Ratul.</i>\n\n⏳ <b>বিঃদ্রঃ</b> ৫ মিনিট পর মেসেজটি ডিলিট হয়ে যাবে।"
 
     if message_to_edit:
         msg = await message_to_edit.edit_text(msg_text, parse_mode="HTML")
     else:
         msg = await context.bot.send_message(chat_id=chat_id, text=msg_text, parse_mode="HTML")
 
-    # ৫ মিনিট পর ডিলিট
-    context.job_queue.run_once(
-        delete_link_message, 
-        when=DELETE_TIME, 
-        data={"chat_id": chat_id, "message_id": msg.message_id}
-    )
+    context.job_queue.run_once(delete_link_message, when=DELETE_TIME, data={"chat_id": chat_id, "message_id": msg.message_id})
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
-    await add_user(user_id)
+    
+    if await is_user_banned(user_id):
+        return await update.message.reply_text("🚫 আপনি এই বট ব্যবহারের জন্য নিষিদ্ধ (Banned)!")
 
+    await add_user(user_id)
     payload = context.args[0] if context.args else None
 
-    # Force Join
     if not await is_user_joined(user_id, context):
         await update.message.reply_text(
-            "❌ <b>অ্যাক্সেস ডিনাইড!</b>\n\nলিংক পেতে বা বট ব্যবহার করতে হলে আপনাকে প্রথমে আমাদের স্পন্সর চ্যানেলগুলোতে যুক্ত হতে হবে।",
-            reply_markup=get_force_join_keyboard(payload),
-            parse_mode="HTML"
+            "❌ <b>অ্যাক্সেস ডিনাইড!</b>\nলিংক পেতে বা বট ব্যবহার করতে হলে আপনাকে স্পন্সর চ্যানেলে যুক্ত হতে হবে।",
+            reply_markup=get_force_join_keyboard(payload), parse_mode="HTML"
         )
         return
 
-    # Link Access
     if payload:
         stream_data = await get_stream_data(payload)
         if stream_data:
             await track_click() 
             await send_stream_message(context, chat_id, stream_data)
         else:
-            await update.message.reply_text("❌ দুঃখিত, এই লিংকটির মেয়াদ শেষ বা ডাটাবেসে পাওয়া যায়নি।")
+            await update.message.reply_text("❌ দুঃখিত, এই লিংকটির মেয়াদ শেষ বা এটি এক্সপায়ার হয়ে গেছে।")
         return
 
-    # Normal Start
     if user_id == ADMIN_ID:
-        await update.message.reply_text("👑 <b>অ্যাডমিন প্যানেলে স্বাগতম!</b>\nসিস্টেম অন এবং রেডি।", reply_markup=admin_keyboard, parse_mode="HTML")
+        await update.message.reply_text("👑 <b>Enterprise প্যানেলে স্বাগতম!</b>", reply_markup=admin_keyboard, parse_mode="HTML")
     else:
         await update.message.reply_text("✅ <b>All In One Reborn বটে স্বাগতম!</b>\nআমাদের চ্যানেলে দেওয়া লিংকে ক্লিক করে লাইভ ভিডিও উপভোগ করুন।", parse_mode="HTML")
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    user_id = query.from_user.id
-    chat_id = query.message.chat_id
+    user_id, chat_id = query.from_user.id, query.message.chat_id
     data = query.data
-
     await query.answer()
 
     if data.startswith("check_join"):
-        payload = data.split("|")[1] if "|" in data else None
-        
         if await is_user_joined(user_id, context):
+            payload = data.split("|")[1] if "|" in data else None
             if payload:
                 stream_data = await get_stream_data(payload)
                 if stream_data:
                     await track_click()
                     await send_stream_message(context, chat_id, stream_data, message_to_edit=query.message)
                 else:
-                    await query.message.edit_text("❌ লিংকটি খুঁজে পাওয়া যায়নি।")
+                    await query.message.edit_text("❌ লিংকটি খুঁজে পাওয়া যায়নি বা মেয়াদোত্তীর্ণ।")
             else:
-                await query.message.edit_text("✅ ভেরিফিকেশন সম্পন্ন! এখন আপনি চ্যানেল থেকে স্ট্রিম দেখতে পারবেন।")
+                await query.message.edit_text("✅ ভেরিফিকেশন সম্পন্ন! চ্যানেল থেকে স্ট্রিম দেখুন।")
         else:
-            await query.message.reply_text("❌ আপনি এখনও সব চ্যানেলে যুক্ত হননি! দয়া করে যুক্ত হয়ে আবার চেষ্টা করুন।")
+            await query.message.reply_text("❌ আপনি এখনও সব চ্যানেলে যুক্ত হননি!")
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text.strip()
+    
+    if await is_user_banned(user_id): return
     await add_user(user_id)
 
-    if user_id != ADMIN_ID:
-        return
+    if user_id != ADMIN_ID: return
 
     state = admin_state.get(user_id)
 
     if state == "add_link":
         if text.startswith("http"):
             await add_m3u_source(text)
-            await update.message.reply_text("✅ নতুন M3U সোর্স ডাটাবেসে সেভ হয়েছে।")
+            await update.message.reply_text("✅ নতুন M3U সোর্স সফলভাবে সেভ হয়েছে।")
         else:
             await update.message.reply_text("❌ ভুল ইউআরএল। সঠিক HTTP লিংক দিন।")
         admin_state.pop(user_id, None)
         return
 
     elif state == "delete_link":
-        await remove_m3u_source(text)
-        await update.message.reply_text("✅ লিংকটি ডাটাবেস থেকে মুছে ফেলা হয়েছে।")
+        deleted_streams, deleted_links = await remove_m3u_source(text)
+        await update.message.reply_text(f"✅ <b>সোর্স মুছে ফেলা হয়েছে!</b>\n\n🗑 <b>Cleanup Report:</b>\n• মুছে ফেলা পোস্টেড স্ট্রিম: {deleted_streams}\n• মুছে ফেলা শর্ট লিংক: {deleted_links}", parse_mode="HTML")
+        admin_state.pop(user_id, None)
+        return
+
+    elif state == "ban_user":
+        try:
+            target_id = int(text)
+            await toggle_ban_user(target_id, True)
+            await update.message.reply_text(f"✅ ইউজার {target_id} কে ব্যান করা হয়েছে।")
+        except ValueError:
+            await update.message.reply_text("❌ ভুল ইউজার আইডি।")
         admin_state.pop(user_id, None)
         return
 
     elif state == "broadcast":
         users = await get_all_users()
-        sent = 0
+        sent, failed = 0, 0
         msg = await update.message.reply_text(f"🚀 ব্রডকাস্ট শুরু হচ্ছে... ({len(users)} ইউজার)")
         for uid in users:
             try:
                 await context.bot.send_message(chat_id=uid, text=text)
                 sent += 1
                 await asyncio.sleep(0.05)
+            except RetryAfter as e:
+                await asyncio.sleep(e.retry_after)
             except Exception:
-                pass
-        await msg.edit_text(f"✅ ব্রডকাস্ট সম্পন্ন! মোট {sent} জনকে মেসেজ পাঠানো হয়েছে।")
+                failed += 1
+        await msg.edit_text(f"✅ ব্রডকাস্ট সম্পন্ন!\nসফল: {sent}\nব্যর্থ: {failed}")
         admin_state.pop(user_id, None)
         return
 
     if text == "➕ লিংক যুক্ত করুন":
         admin_state[user_id] = "add_link"
-        await update.message.reply_text("🔗 অনুগ্রহ করে নতুন M3U বা M3U8 প্লেলিস্টের ইউআরএল দিন:")
+        await update.message.reply_text("🔗 অনুগ্রহ করে নতুন M3U/M3U8 ইউআরএল দিন:")
 
     elif text == "➖ লিংক মুছুন":
         admin_state[user_id] = "delete_link"
-        await update.message.reply_text("🗑 ডাটাবেস থেকে মুছতে হুবহু লিংকটি দিন:")
+        await update.message.reply_text("🗑 মুছতে চাইলে হুবহু লিংকটি দিন (এর সকল ডেটা মুছে যাবে):")
 
     elif text == "📃 সব লিংক":
         sources = await get_m3u_sources()
-        if sources:
-            source_text = "\n\n".join([f"🔹 {s}" for s in sources])
-            await update.message.reply_text(f"📂 <b>আপনার সমস্ত সোর্স:</b>\n\n{source_text}", parse_mode="HTML")
-        else:
-            await update.message.reply_text("❌ ডাটাবেসে কোনো লিংক নেই।")
+        source_text = "\n\n".join([f"🔹 {s}" for s in sources]) if sources else "❌ ডাটাবেসে কোনো লিংক নেই।"
+        await update.message.reply_text(f"📂 <b>আপনার সমস্ত সোর্স:</b>\n\n{source_text}", parse_mode="HTML")
 
     elif text == "👥 মোট ইউজার":
         users = await get_all_users()
-        await update.message.reply_text(f"👥 <b>বটের মোট রেজিস্টার্ড ইউজার:</b> {len(users)} জন", parse_mode="HTML")
+        await update.message.reply_text(f"👥 <b>অ্যাক্টিভ ইউজার:</b> {len(users)} জন", parse_mode="HTML")
 
     elif text == "📊 অ্যানালিটিক্স":
         total_posted, total_clicks = await get_stats()
-        await update.message.reply_text(
-            f"📊 <b>Xtream Analytics</b>\n\n"
-            f"📺 <b>মোট পোস্ট করা স্ট্রিম:</b> <code>{total_posted}</code>\n"
-            f"🖱 <b>ইউজারদের মোট লিংক ক্লিক:</b> <code>{total_clicks}</code>",
-            parse_mode="HTML"
-        )
+        await update.message.reply_text(f"📊 <b>Enterprise Analytics</b>\n\n📺 <b>পোস্ট করা স্ট্রিম:</b> <code>{total_posted}</code>\n🖱 <b>মোট ক্লিক:</b> <code>{total_clicks}</code>", parse_mode="HTML")
 
     elif text == "📢 ব্রডকাস্ট":
         admin_state[user_id] = "broadcast"
-        await update.message.reply_text("📝 ব্যবহারকারীদের যে মেসেজটি পাঠাতে চান তা লিখুন:")
+        await update.message.reply_text("📝 ব্রডকাস্ট মেসেজটি লিখুন:")
+
+    elif text == "⚙️ সিস্টেম স্ট্যাটাস":
+        await update.message.reply_text(f"🖥 <b>সার্ভার স্ট্যাটাস:</b>\n\n{get_sys_status()}", parse_mode="HTML")
+
+    elif text == "🚫 ইউজার ব্যান":
+        admin_state[user_id] = "ban_user"
+        await update.message.reply_text("🚫 যাকে ব্যান করতে চান তার User ID দিন:")
 
     elif text == "🔄 ফোর্স চেক":
-        await update.message.reply_text("🔍 ব্যাকগ্রাউন্ডে লিংক স্ক্যানিং শুরু হয়েছে...")
+        await update.message.reply_text("🔍 ব্যাকগ্রাউন্ডে স্ক্যানিং এবং ডেড লিংক ক্লিনিং শুরু হয়েছে...")
         asyncio.create_task(auto_checker_job(context))
 
 # =========================================================
@@ -461,7 +489,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================================================
 def main():
     if not MONGO_URI:
-        logger.error("MONGO_URI ভেরিয়েবল সেট করা হয়নি! ডাটাবেস কানেক্ট করতে ব্যর্থ।")
+        logger.error("MONGO_URI Error! Database connection failed.")
         return
 
     app = Application.builder().token(BOT_TOKEN).build()
@@ -470,9 +498,10 @@ def main():
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
 
+    # Auto Jobs
     app.job_queue.run_repeating(auto_checker_job, interval=CHECK_TIME, first=10)
 
-    logger.info("All In One Reborn - Enterprise Bot is RUNNING with MongoDB, Auto-Delete & Header Parser...")
+    logger.info("Enterprise Bot is RUNNING with Real-time Sync & Auto-Expire...")
     app.run_polling()
 
 if __name__ == "__main__":
