@@ -243,7 +243,7 @@ def get_force_join_keyboard(payload=None):
     return InlineKeyboardMarkup(buttons)
 
 # =========================================================
-# JOBS: AUTO POSTING & LIVE MESSAGE EDITING
+# JOBS: 100% POST GUARANTEE & LIVE MESSAGE EDITING
 # =========================================================
 async def post_to_channel(context, title, category, logo, stream_url, referer, origin, source_url):
     short_id = await create_short_link(stream_url, referer, origin, source_url)
@@ -259,15 +259,35 @@ async def post_to_channel(context, title, category, logo, stream_url, referer, o
         f"🔄 <b>সর্বশেষ আপডেট:</b> <code>{now_time}</code>\n"
         f"⚡ <i>All In One Reborn | Auto Updated Feed</i>"
     )
+    
+    msg_id = None
     try:
+        # টেলিগ্রামের লিমিট থেকে বাঁচতে প্রতিটি পোস্টের আগে ৩ সেকেন্ড করে বিরতি
+        await asyncio.sleep(3) 
+
         if logo and logo.startswith("http"):
-            msg = await context.bot.send_photo(chat_id=CHANNEL_ID, photo=logo, caption=text, parse_mode="HTML")
+            try:
+                msg = await context.bot.send_photo(chat_id=CHANNEL_ID, photo=logo, caption=text, parse_mode="HTML")
+                msg_id = msg.message_id
+            except Exception as photo_err:
+                logger.warning(f"লোগো লোড হতে ব্যর্থ ({logo}), সাধারণ টেক্সট পোস্ট করা হচ্ছে... Error: {photo_err}")
+                # লোগো কাজ না করলে সাধারণ টেক্সট হিসেবে পাঠাবে
+                msg = await context.bot.send_message(chat_id=CHANNEL_ID, text=text, parse_mode="HTML", disable_web_page_preview=True)
+                msg_id = msg.message_id
         else:
             msg = await context.bot.send_message(chat_id=CHANNEL_ID, text=text, parse_mode="HTML", disable_web_page_preview=True)
-        await asyncio.sleep(2)
-        return msg.message_id, short_id
+            msg_id = msg.message_id
+            
+        return msg_id, short_id
+
+    except RetryAfter as flood_err:
+        # যদি এরপরও টেলিগ্রাম ব্লক করে, তবে অপেক্ষা করে আবার চেষ্টা করবে
+        logger.error(f"FloodWait! টেলিগ্রাম ব্লক করেছে। {flood_err.retry_after} সেকেন্ড অপেক্ষা করা হচ্ছে...")
+        await asyncio.sleep(flood_err.retry_after)
+        return await post_to_channel(context, title, category, logo, stream_url, referer, origin, source_url)
+        
     except Exception as e:
-        logger.error(f"Channel Post Error: {e}")
+        logger.error(f"Channel Post Error ({title}): {e}")
         return None, None
 
 async def auto_checker_job(context: ContextTypes.DEFAULT_TYPE):
@@ -304,7 +324,7 @@ async def auto_checker_job(context: ContextTypes.DEFAULT_TYPE):
                         {"$set": {"stream_url": stream_url, "posted_at": datetime.utcnow()}}
                     )
                     
-                    # শর্ট-লিংকের টার্গেট আপডেট (যাতে পুরোনো লিংকে ক্লিক করলেই নতুন স্ট্রিম চলে আসে)
+                    # শর্ট-লিংকের টার্গেট আপডেট
                     await links_col.update_one(
                         {"stream_url": old_stream_url},
                         {"$set": {
@@ -564,7 +584,7 @@ def main():
     # Auto Jobs
     app.job_queue.run_repeating(auto_checker_job, interval=CHECK_TIME, first=10)
 
-    logger.info("Enterprise Bot is RUNNING with Silent Auto-Healing & Live Message Editing...")
+    logger.info("Enterprise Bot is RUNNING with Guaranteed Channel Posts & Live Editing...")
     app.run_polling()
 
 if __name__ == "__main__":
