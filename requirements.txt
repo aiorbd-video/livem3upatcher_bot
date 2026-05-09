@@ -3,3 +3,4 @@ aiohttp
 motor
 requests
 pytz
+psutil
