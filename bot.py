@@ -6,6 +6,7 @@ import logging
 import asyncio
 import aiohttp
 from datetime import datetime, timedelta
+import pytz
 from motor.motor_asyncio import AsyncIOMotorClient
 
 from telegram import (
@@ -24,6 +25,7 @@ from telegram.ext import (
 )
 from telegram.error import RetryAfter
 
+# সার্ভার মনিটরিং (CPU/RAM)
 try:
     import psutil
     HAS_PSUTIL = True
@@ -49,8 +51,8 @@ ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 MONGO_URI = os.getenv("MONGO_URI")
 
 FORCE_CHANNELS = [x.strip() for x in os.getenv("FORCE_CHANNELS", "").split(",") if x.strip()]
-CHECK_TIME = int(os.getenv("CHECK_TIME", "300"))
-DELETE_TIME = 300  # ৫ মিনিট
+CHECK_TIME = int(os.getenv("CHECK_TIME", "300"))  # ৫ মিনিট
+DELETE_TIME = 300  # প্রাইভেট মেসেজ ডিলিট হওয়ার সময় (৫ মিনিট)
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -58,6 +60,7 @@ HEADERS = {
 }
 
 START_TIME = time.time()
+bd_tz = pytz.timezone("Asia/Dhaka")
 
 # =========================================================
 # MONGODB SETUP
@@ -100,6 +103,7 @@ async def add_m3u_source(url: str):
     )
 
 async def remove_m3u_source(url: str):
+    """Cascade Deletion: সোর্স রিমুভ করলে তার সকল ডেটা মুছে যাবে"""
     await sources_col.delete_one({"url": url})
     deleted_streams = await posted_col.delete_many({"source_url": url})
     deleted_links = await links_col.delete_many({"source_url": url})
@@ -108,17 +112,15 @@ async def remove_m3u_source(url: str):
 async def get_m3u_sources():
     return [doc["url"] async for doc in sources_col.find({})]
 
-async def is_stream_posted(stream_url: str):
-    return await posted_col.find_one({"stream_url": stream_url}) is not None
-
-async def save_posted_stream(stream_url: str, title: str, source_url: str, message_id: int):
+async def save_posted_stream(stream_url: str, title: str, source_url: str, message_id: int, short_id: str):
     await posted_col.update_one(
-        {"stream_url": stream_url}, 
+        {"title": title, "source_url": source_url}, 
         {"$set": {
             "title": title, 
             "stream_url": stream_url, 
             "source_url": source_url,
             "message_id": message_id,
+            "short_id": short_id,
             "posted_at": datetime.utcnow()
         }}, 
         upsert=True
@@ -153,12 +155,12 @@ async def get_stats():
     return (posted["count"] if posted else 0), (clicks["count"] if clicks else 0)
 
 # =========================================================
-# REAL-TIME SYNC & EXPIRE SYSTEM (No Channel Deletion)
+# REAL-TIME SYNC & EXPIRE SYSTEM (DB-Only Deletion)
 # =========================================================
-async def remove_expired_streams(source_url: str, active_stream_urls: list, context: ContextTypes.DEFAULT_TYPE):
-    """M3U ফাইল থেকে রিমুভ হওয়া লিংকগুলো শুধু ডাটাবেস থেকে মুছে ফেলবে"""
+async def remove_expired_streams(source_url: str, active_stream_urls: list):
+    """M3U ফাইল থেকে রিমুভ হওয়া লিংকগুলো শুধু ডাটাবেস থেকে মুছে ফেলবে (চ্যানেল পোস্ট থাকবে)"""
     if not active_stream_urls:
-        return 0  # Safety: If fetch failed or list is empty, avoid mass deletion
+        return 0 
 
     db_streams = posted_col.find({"source_url": source_url})
     expired_urls = []
@@ -166,10 +168,8 @@ async def remove_expired_streams(source_url: str, active_stream_urls: list, cont
     async for doc in db_streams:
         if doc["stream_url"] not in active_stream_urls:
             expired_urls.append(doc["stream_url"])
-            # চ্যানেল থেকে ডিলিট করার কোড রিমুভ করা হয়েছে। পোস্ট চ্যানেলেই থাকবে।
 
     if expired_urls:
-        # Remove only from Databases
         await posted_col.delete_many({"stream_url": {"$in": expired_urls}})
         await links_col.delete_many({"stream_url": {"$in": expired_urls}})
         logger.info(f"Sync: Removed {len(expired_urls)} expired streams from DB for {source_url}")
@@ -243,18 +243,20 @@ def get_force_join_keyboard(payload=None):
     return InlineKeyboardMarkup(buttons)
 
 # =========================================================
-# JOBS: AUTO POSTING & SYNC
+# JOBS: AUTO POSTING & LIVE MESSAGE EDITING
 # =========================================================
 async def post_to_channel(context, title, category, logo, stream_url, referer, origin, source_url):
     short_id = await create_short_link(stream_url, referer, origin, source_url)
     deep_link = f"https://t.me/{BOT_USERNAME}?start={short_id}"
+    now_time = datetime.now(bd_tz).strftime("%I:%M %p (%d %b)")
 
     text = (
         f"📡 <b>{title}</b>\n\n"
         f"📂 <b>ক্যাটাগরি:</b> {category}\n"
-        f"🔥 <b>নতুন লাইভ স্ট্রিম আপডেট হয়েছে</b>\n\n"
+        f"🟢 <b>[LIVE] লাইভ স্ট্রিমটি সচল আছে</b>\n\n"
         f"📝 এইচডি কোয়ালিটিতে সরাসরি খেলা উপভোগ করুন।\n\n"
         f"🔗 <a href='{deep_link}'>সরাসরি দেখতে এখানে ক্লিক করুন</a>\n\n"
+        f"🔄 <b>সর্বশেষ আপডেট:</b> <code>{now_time}</code>\n"
         f"⚡ <i>All In One Reborn | Auto Updated Feed</i>"
     )
     try:
@@ -263,10 +265,10 @@ async def post_to_channel(context, title, category, logo, stream_url, referer, o
         else:
             msg = await context.bot.send_message(chat_id=CHANNEL_ID, text=text, parse_mode="HTML", disable_web_page_preview=True)
         await asyncio.sleep(2)
-        return msg.message_id
+        return msg.message_id, short_id
     except Exception as e:
         logger.error(f"Channel Post Error: {e}")
-        return None
+        return None, None
 
 async def auto_checker_job(context: ContextTypes.DEFAULT_TYPE):
     sources = await get_m3u_sources()
@@ -277,23 +279,83 @@ async def auto_checker_job(context: ContextTypes.DEFAULT_TYPE):
         streams = parse_m3u_playlist(content)
         active_urls = []
 
-        # 1. Post New Streams
         for item in streams:
             stream_url = item.get("url")
-            if not stream_url: continue
+            title = item.get("title")
+            if not stream_url or not title: continue
             
             active_urls.append(stream_url)
 
-            if await is_stream_posted(stream_url): 
-                continue
+            # ১. চেক করুন এই Title-এর কোনো স্ট্রিম আগেই পোস্ট হয়েছে কিনা
+            existing_post = await posted_col.find_one({"title": title, "source_url": source})
 
-            msg_id = await post_to_channel(context, item["title"], item["group"], item["logo"], stream_url, item["referer"], item["origin"], source)
-            if msg_id:
-                await save_posted_stream(stream_url, item["title"], source, msg_id)
+            if existing_post:
+                old_stream_url = existing_post.get("stream_url")
+                msg_id = existing_post.get("message_id")
+                short_id = existing_post.get("short_id")
+                
+                # যদি ব্যাকগ্রাউন্ডে লিংক পরিবর্তন হয়ে থাকে (Silent Update & Live Edit)
+                if old_stream_url != stream_url:
+                    now_time = datetime.now(bd_tz).strftime("%I:%M %p (%d %b)")
+                    
+                    # ডাটাবেস আপডেট
+                    await posted_col.update_one(
+                        {"_id": existing_post["_id"]},
+                        {"$set": {"stream_url": stream_url, "posted_at": datetime.utcnow()}}
+                    )
+                    
+                    # শর্ট-লিংকের টার্গেট আপডেট (যাতে পুরোনো লিংকে ক্লিক করলেই নতুন স্ট্রিম চলে আসে)
+                    await links_col.update_one(
+                        {"stream_url": old_stream_url},
+                        {"$set": {
+                            "stream_url": stream_url,
+                            "referer": item["referer"],
+                            "origin": item["origin"],
+                            "updated_at": datetime.utcnow()
+                        }}
+                    )
 
-        # 2. Sync & Expire Removed Streams
+                    deep_link = f"https://t.me/{BOT_USERNAME}?start={short_id}"
+                    updated_text = (
+                        f"📡 <b>{title}</b>\n\n"
+                        f"📂 <b>ক্যাটাগরি:</b> {item['group']}\n"
+                        f"🟢 <b>[LIVE] লাইভ স্ট্রিমটি সচল আছে</b>\n\n"
+                        f"📝 এইচডি কোয়ালিটিতে সরাসরি খেলা উপভোগ করুন।\n\n"
+                        f"🔗 <a href='{deep_link}'>সরাসরি দেখতে এখানে ক্লিক করুন</a>\n\n"
+                        f"🔄 <b>সর্বশেষ আপডেট:</b> <code>{now_time}</code>\n"
+                        f"⚡ <i>All In One Reborn | Auto Updated Feed</i>"
+                    )
+
+                    # চ্যানেলের মেসেজ এডিট
+                    if msg_id:
+                        try:
+                            if item["logo"] and item["logo"].startswith("http"):
+                                await context.bot.edit_message_caption(
+                                    chat_id=CHANNEL_ID, message_id=msg_id, 
+                                    caption=updated_text, parse_mode="HTML"
+                                )
+                            else:
+                                await context.bot.edit_message_text(
+                                    chat_id=CHANNEL_ID, message_id=msg_id, 
+                                    text=updated_text, parse_mode="HTML", disable_web_page_preview=True
+                                )
+                            logger.info(f"🔄 Live Edited: '{title}' updated at {now_time}")
+                        except Exception as e:
+                            logger.warning(f"Could not edit message {msg_id}: {e}")
+                            
+                continue  
+
+            # ২. সম্পূর্ণ নতুন চ্যানেল হলে প্রথমবার পোস্ট হবে
+            msg_id, short_id = await post_to_channel(
+                context, item["title"], item["group"], item["logo"], 
+                stream_url, item["referer"], item["origin"], source
+            )
+            if msg_id and short_id:
+                await save_posted_stream(stream_url, item["title"], source, msg_id, short_id)
+
+        # ৩. M3U থেকে পুরোপুরি রিমুভ হয়ে যাওয়া লিংকগুলো ডাটাবেস থেকে মুছে ফেলা
         if len(active_urls) > 0:
-            await remove_expired_streams(source, active_urls, context)
+            await remove_expired_streams(source, active_urls)
 
 async def delete_link_message(context: ContextTypes.DEFAULT_TYPE):
     job_data = context.job.data
@@ -361,7 +423,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await track_click() 
             await send_stream_message(context, chat_id, stream_data)
         else:
-            # লিংক ডাটাবেসে না থাকলে নতুন মেসেজ
             await update.message.reply_text(
                 "❌ <b>এই লিংকটির মেয়াদ শেষ (Expired)!</b>\n\nদয়া করে চ্যানেল থেকে নতুন আপডেট হওয়া লিংকে ক্লিক করে সংগ্রহ করুন।", 
                 parse_mode="HTML"
@@ -388,7 +449,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await track_click()
                     await send_stream_message(context, chat_id, stream_data, message_to_edit=query.message)
                 else:
-                    # লিংক ডাটাবেসে না থাকলে নতুন মেসেজ
                     await query.message.edit_text(
                         "❌ <b>এই লিংকটির মেয়াদ শেষ (Expired)!</b>\n\nদয়া করে চ্যানেল থেকে নতুন আপডেট হওয়া লিংকে ক্লিক করে সংগ্রহ করুন।", 
                         parse_mode="HTML"
@@ -504,7 +564,7 @@ def main():
     # Auto Jobs
     app.job_queue.run_repeating(auto_checker_job, interval=CHECK_TIME, first=10)
 
-    logger.info("Enterprise Bot is RUNNING with Real-time Sync & DB-only Expire...")
+    logger.info("Enterprise Bot is RUNNING with Silent Auto-Healing & Live Message Editing...")
     app.run_polling()
 
 if __name__ == "__main__":
