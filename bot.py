@@ -153,10 +153,10 @@ async def get_stats():
     return (posted["count"] if posted else 0), (clicks["count"] if clicks else 0)
 
 # =========================================================
-# REAL-TIME SYNC & EXPIRE SYSTEM
+# REAL-TIME SYNC & EXPIRE SYSTEM (No Channel Deletion)
 # =========================================================
 async def remove_expired_streams(source_url: str, active_stream_urls: list, context: ContextTypes.DEFAULT_TYPE):
-    """M3U ফাইল থেকে রিমুভ হওয়া লিংকগুলো ডাটাবেস ও চ্যানেল থেকে মুছে ফেলবে"""
+    """M3U ফাইল থেকে রিমুভ হওয়া লিংকগুলো শুধু ডাটাবেস থেকে মুছে ফেলবে"""
     if not active_stream_urls:
         return 0  # Safety: If fetch failed or list is empty, avoid mass deletion
 
@@ -166,18 +166,13 @@ async def remove_expired_streams(source_url: str, active_stream_urls: list, cont
     async for doc in db_streams:
         if doc["stream_url"] not in active_stream_urls:
             expired_urls.append(doc["stream_url"])
-            # Remove post from Telegram Channel
-            if doc.get("message_id"):
-                try:
-                    await context.bot.delete_message(chat_id=CHANNEL_ID, message_id=doc["message_id"])
-                except Exception as e:
-                    logger.warning(f"Could not delete message {doc['message_id']} from channel: {e}")
+            # চ্যানেল থেকে ডিলিট করার কোড রিমুভ করা হয়েছে। পোস্ট চ্যানেলেই থাকবে।
 
     if expired_urls:
-        # Remove from Databases
+        # Remove only from Databases
         await posted_col.delete_many({"stream_url": {"$in": expired_urls}})
         await links_col.delete_many({"stream_url": {"$in": expired_urls}})
-        logger.info(f"Sync: Removed {len(expired_urls)} expired streams for {source_url}")
+        logger.info(f"Sync: Removed {len(expired_urls)} expired streams from DB for {source_url}")
         
     return len(expired_urls)
 
@@ -296,7 +291,7 @@ async def auto_checker_job(context: ContextTypes.DEFAULT_TYPE):
             if msg_id:
                 await save_posted_stream(stream_url, item["title"], source, msg_id)
 
-        # 2. Sync & Expire Removed Streams (If active_urls is valid)
+        # 2. Sync & Expire Removed Streams
         if len(active_urls) > 0:
             await remove_expired_streams(source, active_urls, context)
 
@@ -366,7 +361,11 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await track_click() 
             await send_stream_message(context, chat_id, stream_data)
         else:
-            await update.message.reply_text("❌ দুঃখিত, এই লিংকটির মেয়াদ শেষ বা এটি এক্সপায়ার হয়ে গেছে।")
+            # লিংক ডাটাবেসে না থাকলে নতুন মেসেজ
+            await update.message.reply_text(
+                "❌ <b>এই লিংকটির মেয়াদ শেষ (Expired)!</b>\n\nদয়া করে চ্যানেল থেকে নতুন আপডেট হওয়া লিংকে ক্লিক করে সংগ্রহ করুন।", 
+                parse_mode="HTML"
+            )
         return
 
     if user_id == ADMIN_ID:
@@ -389,7 +388,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await track_click()
                     await send_stream_message(context, chat_id, stream_data, message_to_edit=query.message)
                 else:
-                    await query.message.edit_text("❌ লিংকটি খুঁজে পাওয়া যায়নি বা মেয়াদোত্তীর্ণ।")
+                    # লিংক ডাটাবেসে না থাকলে নতুন মেসেজ
+                    await query.message.edit_text(
+                        "❌ <b>এই লিংকটির মেয়াদ শেষ (Expired)!</b>\n\nদয়া করে চ্যানেল থেকে নতুন আপডেট হওয়া লিংকে ক্লিক করে সংগ্রহ করুন।", 
+                        parse_mode="HTML"
+                    )
             else:
                 await query.message.edit_text("✅ ভেরিফিকেশন সম্পন্ন! চ্যানেল থেকে স্ট্রিম দেখুন।")
         else:
@@ -501,7 +504,7 @@ def main():
     # Auto Jobs
     app.job_queue.run_repeating(auto_checker_job, interval=CHECK_TIME, first=10)
 
-    logger.info("Enterprise Bot is RUNNING with Real-time Sync & Auto-Expire...")
+    logger.info("Enterprise Bot is RUNNING with Real-time Sync & DB-only Expire...")
     app.run_polling()
 
 if __name__ == "__main__":
