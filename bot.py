@@ -53,7 +53,7 @@ MONGO_URI = os.getenv("MONGO_URI")
 
 FORCE_CHANNELS = [x.strip() for x in os.getenv("FORCE_CHANNELS", "").split(",") if x.strip()]
 CHECK_TIME = int(os.getenv("CHECK_TIME", "300"))  # ৫ মিনিট
-DELETE_TIME = 300  # প্রাইভেট মেসেজ ডিলিট হওয়ার সময় (৫ মিনিট)
+DELETE_TIME = 300  # প্রাইভেট মেসেজ ডিলিট হওয়ার সময় (৫ মিনিট)
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -178,7 +178,7 @@ async def remove_expired_streams(source_url: str, active_stream_urls: list):
     return len(expired_urls)
 
 # =========================================================
-# ADVANCED M3U PARSER (JSON HTTP, Cookies & User-Agent Supported)
+# BULLETPROOF M3U PARSER (Fixes Glued One-Line Toffee Playlists)
 # =========================================================
 async def fetch_m3u_content(url: str):
     try:
@@ -192,13 +192,21 @@ async def fetch_m3u_content(url: str):
 
 def parse_m3u_playlist(content: str):
     streams = []
-    lines = content.splitlines()
+    
+    # ---------------------------------------------------------
+    # 🔥 UN-GLUE MAGIC: জোড়া লাগানো লাইনগুলোকে ভেঙে সোজা করা হচ্ছে
+    # ---------------------------------------------------------
+    tags_to_fix = ["#EXTINF", "#EXTVLCOPT", "#EXTHTTP", "#TOTAL-VS-MATCHES", "#LAST-UPDATED"]
+    for tag in tags_to_fix:
+        content = content.replace(tag, "\n" + tag)
+        
+    # ফাঁকা লাইন বাদ দিয়ে শুধু আসল লাইনগুলো লিস্টে নেওয়া হচ্ছে
+    lines = [line.strip() for line in content.splitlines() if line.strip()]
+    # ---------------------------------------------------------
+
     current_stream = {"title": "অজানা স্ট্রিম", "group": "লাইভ টিভি", "logo": "", "referer": "", "origin": "", "cookie": "", "user_agent": ""}
 
     for line in lines:
-        line = line.strip()
-        
-        # ইগনোর ট্যাগসমূহ
         if line.startswith("#TOTAL-VS-MATCHES:") or line.startswith("#LAST-UPDATED:"):
             continue
 
@@ -222,7 +230,6 @@ def parse_m3u_playlist(content: str):
         # JSON-Header Parsing (#EXTHTTP:{"cookie":"..."}https://...)
         elif line.startswith("#EXTHTTP:"):
             try:
-                # JSON অংশটুকু এবং মেইন URL আলাদা করা হচ্ছে
                 json_part = re.search(r'#EXTHTTP:(\{.*?\})(http.*)', line)
                 if json_part:
                     headers_data = json.loads(json_part.group(1))
@@ -238,7 +245,7 @@ def parse_m3u_playlist(content: str):
                     current_stream = {"title": "অজানা স্ট্রিম", "group": "লাইভ টিভি", "logo": "", "referer": "", "origin": "", "cookie": "", "user_agent": ""}
                     continue
             except Exception as e:
-                logger.warning(f"JSON Parse Error in line: {line} -> {e}")
+                logger.warning(f"JSON Parse Error: {e}")
 
         elif line.startswith("http") and (".m3u8" in line or ".ts" in line):
             raw_url = line
@@ -616,7 +623,7 @@ def main():
     # Auto Jobs
     app.job_queue.run_repeating(auto_checker_job, interval=CHECK_TIME, first=10)
 
-    logger.info("Enterprise Bot is RUNNING with Custom JSON, Cookie & User-Agent Support...")
+    logger.info("Bulletproof Enterprise Bot is RUNNING (Fixes Glued Playlists)...")
     app.run_polling()
 
 if __name__ == "__main__":
