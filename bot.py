@@ -127,7 +127,7 @@ async def save_posted_stream(stream_url: str, title: str, source_url: str, messa
     )
     await stats_col.update_one({"stat_name": "total_posted"}, {"$inc": {"count": 1}}, upsert=True)
 
-async def create_short_link(stream_url: str, referer: str, origin: str, source_url: str):
+async def create_short_link(stream_url: str, referer: str, origin: str, cookie: str, source_url: str):
     short_id = hashlib.md5((stream_url + str(time.time())).encode()).hexdigest()[:12]
     await links_col.update_one(
         {"short_id": short_id}, 
@@ -136,6 +136,7 @@ async def create_short_link(stream_url: str, referer: str, origin: str, source_u
             "stream_url": stream_url,
             "referer": referer,
             "origin": origin,
+            "cookie": cookie,
             "source_url": source_url,
             "created_at": datetime.utcnow()
         }}, 
@@ -158,7 +159,7 @@ async def get_stats():
 # REAL-TIME SYNC & EXPIRE SYSTEM (DB-Only Deletion)
 # =========================================================
 async def remove_expired_streams(source_url: str, active_stream_urls: list):
-    """M3U ফাইল থেকে রিমুভ হওয়া লিংকগুলো শুধু ডাটাবেস থেকে মুছে ফেলবে (চ্যানেল পোস্ট থাকবে)"""
+    """M3U ফাইল থেকে রিমুভ হওয়া লিংকগুলো শুধু ডাটাবেস থেকে মুছে ফেলবে"""
     if not active_stream_urls:
         return 0 
 
@@ -177,7 +178,7 @@ async def remove_expired_streams(source_url: str, active_stream_urls: list):
     return len(expired_urls)
 
 # =========================================================
-# SMART M3U PARSER
+# SMART M3U PARSER (Origin, Referer & Cookie Supported)
 # =========================================================
 async def fetch_m3u_content(url: str):
     try:
@@ -192,12 +193,12 @@ async def fetch_m3u_content(url: str):
 def parse_m3u_playlist(content: str):
     streams = []
     lines = content.splitlines()
-    current_stream = {"title": "অজানা স্ট্রিম", "group": "লাইভ টিভি", "logo": "", "referer": "", "origin": ""}
+    current_stream = {"title": "অজানা স্ট্রিম", "group": "লাইভ টিভি", "logo": "", "referer": "", "origin": "", "cookie": ""}
 
     for line in lines:
         line = line.strip()
         if line.startswith("#EXTINF"):
-            current_stream = {"title": "অজানা স্ট্রিম", "group": "লাইভ টিভি", "logo": "", "referer": "", "origin": ""}
+            current_stream = {"title": "অজানা স্ট্রিম", "group": "লাইভ টিভি", "logo": "", "referer": "", "origin": "", "cookie": ""}
             if "," in line: current_stream["title"] = line.split(",")[-1].strip()
             group_match = re.search(r'group-title="([^"]+)"', line)
             logo_match = re.search(r'tvg-logo="([^"]+)"', line)
@@ -205,23 +206,29 @@ def parse_m3u_playlist(content: str):
             if logo_match: current_stream["logo"] = logo_match.group(1)
 
         elif line.startswith("#EXTVLCOPT:http-referrer="):
-            current_stream["referer"] = line.split("=")[1].strip()
+            current_stream["referer"] = line.split("=", 1)[1].strip()
         elif line.startswith("#EXTVLCOPT:http-origin="):
-            current_stream["origin"] = line.split("=")[1].strip()
+            current_stream["origin"] = line.split("=", 1)[1].strip()
+        elif line.startswith("#EXTVLCOPT:http-cookie="):
+            current_stream["cookie"] = line.split("=", 1)[1].strip()
 
         elif line.startswith("http") and (".m3u8" in line or ".ts" in line):
             raw_url = line
             if "|" in raw_url:
-                parts = raw_url.split("|")
+                parts = raw_url.split("|", 1)
                 raw_url, headers_part = parts[0], parts[1]
-                ref_match = re.search(r'Referer=([^&]+)', headers_part)
-                orig_match = re.search(r'Origin=([^&]+)', headers_part)
+                
+                ref_match = re.search(r'Referer=([^&]+)', headers_part, re.IGNORECASE)
+                orig_match = re.search(r'Origin=([^&]+)', headers_part, re.IGNORECASE)
+                cookie_match = re.search(r'Cookie=([^&]+)', headers_part, re.IGNORECASE)
+                
                 if ref_match: current_stream["referer"] = ref_match.group(1)
                 if orig_match: current_stream["origin"] = orig_match.group(1)
+                if cookie_match: current_stream["cookie"] = cookie_match.group(1)
 
             current_stream["url"] = raw_url
             streams.append(current_stream)
-            current_stream = {"title": "অজানা স্ট্রিম", "group": "লাইভ টিভি", "logo": "", "referer": "", "origin": ""}
+            current_stream = {"title": "অজানা স্ট্রিম", "group": "লাইভ টিভি", "logo": "", "referer": "", "origin": "", "cookie": ""}
 
     return streams
 
@@ -245,8 +252,8 @@ def get_force_join_keyboard(payload=None):
 # =========================================================
 # JOBS: 100% POST GUARANTEE & LIVE MESSAGE EDITING
 # =========================================================
-async def post_to_channel(context, title, category, logo, stream_url, referer, origin, source_url):
-    short_id = await create_short_link(stream_url, referer, origin, source_url)
+async def post_to_channel(context, title, category, logo, stream_url, referer, origin, cookie, source_url):
+    short_id = await create_short_link(stream_url, referer, origin, cookie, source_url)
     deep_link = f"https://t.me/{BOT_USERNAME}?start={short_id}"
     now_time = datetime.now(bd_tz).strftime("%I:%M %p (%d %b)")
 
@@ -262,8 +269,7 @@ async def post_to_channel(context, title, category, logo, stream_url, referer, o
     
     msg_id = None
     try:
-        # টেলিগ্রামের লিমিট থেকে বাঁচতে প্রতিটি পোস্টের আগে ৩ সেকেন্ড করে বিরতি
-        await asyncio.sleep(3) 
+        await asyncio.sleep(3) # FloodWait বাইপাস
 
         if logo and logo.startswith("http"):
             try:
@@ -271,7 +277,6 @@ async def post_to_channel(context, title, category, logo, stream_url, referer, o
                 msg_id = msg.message_id
             except Exception as photo_err:
                 logger.warning(f"লোগো লোড হতে ব্যর্থ ({logo}), সাধারণ টেক্সট পোস্ট করা হচ্ছে... Error: {photo_err}")
-                # লোগো কাজ না করলে সাধারণ টেক্সট হিসেবে পাঠাবে
                 msg = await context.bot.send_message(chat_id=CHANNEL_ID, text=text, parse_mode="HTML", disable_web_page_preview=True)
                 msg_id = msg.message_id
         else:
@@ -281,10 +286,9 @@ async def post_to_channel(context, title, category, logo, stream_url, referer, o
         return msg_id, short_id
 
     except RetryAfter as flood_err:
-        # যদি এরপরও টেলিগ্রাম ব্লক করে, তবে অপেক্ষা করে আবার চেষ্টা করবে
         logger.error(f"FloodWait! টেলিগ্রাম ব্লক করেছে। {flood_err.retry_after} সেকেন্ড অপেক্ষা করা হচ্ছে...")
         await asyncio.sleep(flood_err.retry_after)
-        return await post_to_channel(context, title, category, logo, stream_url, referer, origin, source_url)
+        return await post_to_channel(context, title, category, logo, stream_url, referer, origin, cookie, source_url)
         
     except Exception as e:
         logger.error(f"Channel Post Error ({title}): {e}")
@@ -306,7 +310,6 @@ async def auto_checker_job(context: ContextTypes.DEFAULT_TYPE):
             
             active_urls.append(stream_url)
 
-            # ১. চেক করুন এই Title-এর কোনো স্ট্রিম আগেই পোস্ট হয়েছে কিনা
             existing_post = await posted_col.find_one({"title": title, "source_url": source})
 
             if existing_post:
@@ -314,23 +317,22 @@ async def auto_checker_job(context: ContextTypes.DEFAULT_TYPE):
                 msg_id = existing_post.get("message_id")
                 short_id = existing_post.get("short_id")
                 
-                # যদি ব্যাকগ্রাউন্ডে লিংক পরিবর্তন হয়ে থাকে (Silent Update & Live Edit)
                 if old_stream_url != stream_url:
                     now_time = datetime.now(bd_tz).strftime("%I:%M %p (%d %b)")
                     
-                    # ডাটাবেস আপডেট
                     await posted_col.update_one(
                         {"_id": existing_post["_id"]},
                         {"$set": {"stream_url": stream_url, "posted_at": datetime.utcnow()}}
                     )
                     
-                    # শর্ট-লিংকের টার্গেট আপডেট
+                    # ডাটাবেসে নতুন স্ট্রিম, referer, origin এবং cookie আপডেট
                     await links_col.update_one(
                         {"stream_url": old_stream_url},
                         {"$set": {
                             "stream_url": stream_url,
                             "referer": item["referer"],
                             "origin": item["origin"],
+                            "cookie": item["cookie"],
                             "updated_at": datetime.utcnow()
                         }}
                     )
@@ -346,7 +348,6 @@ async def auto_checker_job(context: ContextTypes.DEFAULT_TYPE):
                         f"⚡ <i>All In One Reborn | Auto Updated Feed</i>"
                     )
 
-                    # চ্যানেলের মেসেজ এডিট
                     if msg_id:
                         try:
                             if item["logo"] and item["logo"].startswith("http"):
@@ -365,15 +366,13 @@ async def auto_checker_job(context: ContextTypes.DEFAULT_TYPE):
                             
                 continue  
 
-            # ২. সম্পূর্ণ নতুন চ্যানেল হলে প্রথমবার পোস্ট হবে
             msg_id, short_id = await post_to_channel(
                 context, item["title"], item["group"], item["logo"], 
-                stream_url, item["referer"], item["origin"], source
+                stream_url, item["referer"], item["origin"], item["cookie"], source
             )
             if msg_id and short_id:
                 await save_posted_stream(stream_url, item["title"], source, msg_id, short_id)
 
-        # ৩. M3U থেকে পুরোপুরি রিমুভ হয়ে যাওয়া লিংকগুলো ডাটাবেস থেকে মুছে ফেলা
         if len(active_urls) > 0:
             await remove_expired_streams(source, active_urls)
 
@@ -407,11 +406,17 @@ def get_sys_status():
     return f"⏱ <b>Uptime:</b> {uptime}\n⚠️ <i>Install 'psutil' for RAM/CPU stats.</i>"
 
 async def send_stream_message(context, chat_id, data, message_to_edit=None):
+    # ইউজার ফ্রেন্ডলি এবং কমপ্লিট স্ট্রিম ইনফো UI
     msg_text = f"✅ <b>স্ট্রিম অ্যাক্সেস অনুমোদিত!</b>\n\n🔗 <b>আপনার প্লেব্যাক লিংক:</b>\n<code>{data['stream_url']}</code>\n"
-    if data.get("referer"): msg_text += f"\n🌐 <b>Referer:</b>\n<code>{data['referer']}</code>"
-    if data.get("origin"): msg_text += f"\n🌍 <b>Origin:</b>\n<code>{data['origin']}</code>"
+    
+    if data.get("referer"): 
+        msg_text += f"\n🌐 <b>Referer:</b>\n<code>{data['referer']}</code>"
+    if data.get("origin"): 
+        msg_text += f"\n🌍 <b>Origin:</b>\n<code>{data['origin']}</code>"
+    if data.get("cookie"): 
+        msg_text += f"\n🍪 <b>Cookie:</b>\n<code>{data['cookie']}</code>"
         
-    msg_text += "\n\n<i>(যেকোনো কাস্টম প্লেয়ার বা NS Player অ্যাপে এটি প্লে করতে পারবেন)। This Bot is Developed by Ratul.</i>\n\n⏳ <b>বিঃদ্রঃ</b> ৫ মিনিট পর মেসেজটি ডিলিট হয়ে যাবে।"
+    msg_text += "\n\n<i>(যেকোনো কাস্টম প্লেয়ার বা NS Player অ্যাপে এটি প্লে করতে পারবেন। Referer, Origin এবং Cookie থাকলে তা প্লেয়ারের হেডারে সঠিকভাবে বসাতে হবে)। This Bot is Developed by Ratul.</i>\n\n⏳ <b>বিঃদ্রঃ</b> ৫ মিনিট পর মেসেজটি ডিলিট হয়ে যাবে।"
 
     if message_to_edit:
         msg = await message_to_edit.edit_text(msg_text, parse_mode="HTML")
@@ -584,7 +589,7 @@ def main():
     # Auto Jobs
     app.job_queue.run_repeating(auto_checker_job, interval=CHECK_TIME, first=10)
 
-    logger.info("Enterprise Bot is RUNNING with Guaranteed Channel Posts & Live Editing...")
+    logger.info("Enterprise Bot is RUNNING with Origin, Referer & Cookie Validation Support...")
     app.run_polling()
 
 if __name__ == "__main__":
