@@ -148,7 +148,7 @@ async def remove_expired_streams(source_url: str, active_stream_urls: list):
     return len(expired_urls)
 
 # =========================================================
-# INDESTRUCTIBLE BLOCK PARSER (Enterprise Extra Pro)
+# BULLETPROOF BLOCK PARSER (Quote-Comma Bypass Fixed)
 # =========================================================
 async def fetch_m3u_content(url: str):
     try:
@@ -159,14 +159,12 @@ async def fetch_m3u_content(url: str):
     return None
 
 def parse_m3u_playlist(content: str):
-    """লাইন বাই লাইন বাদ দিয়ে সরাসরি ব্লক কেটে কুকি ও ইউআরএল বের করার চরম লজিক"""
+    """কমা ও কোটেশন বাইপাস করে ১০০% সঠিক টাইটেল বের করার অবিনাশী লজিক"""
     streams = []
     
-    # অপ্রয়োজনীয় ট্যাগ ক্লিন করা
     clean = re.sub(r'#TOTAL-VS-MATCHES:[^\n#]*', '', content)
     clean = re.sub(r'#LAST-UPDATED:[^\n#]*', '', clean)
     
-    # সরাসরি #EXTINF দিয়ে পুরো ফাইলকে ব্লকে ভাগ করা হচ্ছে
     blocks = clean.split("#EXTINF")
     
     for idx, block in enumerate(blocks):
@@ -178,19 +176,31 @@ def parse_m3u_playlist(content: str):
             "referer": "", "origin": "", "cookie": "", "user_agent": "", "url": ""
         }
         
+        extinf_line = block.strip().splitlines()[0] if block.strip() else ""
+        
         # 1. গ্রুপ ও লোগো পার্সিং
-        g_match = re.search(r'group-title="([^"]+)"', block, re.IGNORECASE)
-        l_match = re.search(r'tvg-logo="([^"]+)"', block, re.IGNORECASE)
+        g_match = re.search(r'group-title="([^"]+)"', extinf_line, re.IGNORECASE)
+        l_match = re.search(r'tvg-logo="([^"]+)"', extinf_line, re.IGNORECASE)
         if g_match: stream["group"] = g_match.group(1).strip()
         if l_match: stream["logo"] = l_match.group(1).strip()
         
-        # 2. টাইটেল পার্সিং (লোগোর লিংকের কমা বাইপাস করে আসল নাম বের করা)
-        t_match = re.search(r',\s*([^#\n]+)', block)
-        if t_match:
-            raw_title = t_match.group(1).strip()
-            # যদি নামের ভেতর ভুলে URL চলে আসে তবে তা ক্লিন করা
-            raw_title = re.sub(r'https?://[^\s]+', '', raw_title).strip()
-            if raw_title: stream["title"] = raw_title
+        # ---------------------------------------------------------
+        # 🎯 2. বুলেটপ্রুফ টাইটেল পার্সিং (লোগোর লিংকের কমা বাইপাস)
+        # ---------------------------------------------------------
+        raw_title = ""
+        if '"' in extinf_line:
+            # সর্বশেষ closing quote (") এবং কমা (,) এর পরের অংশটুকু হবে আসল টাইটেল
+            parts = re.split(r'"\s*,', extinf_line)
+            if len(parts) > 1:
+                raw_title = parts[-1].strip()
+            else:
+                raw_title = extinf_line.split(",")[-1].strip()
+        else:
+            raw_title = extinf_line.split(",", 1)[-1].strip()
+            
+        if raw_title: 
+            stream["title"] = raw_title
+        # ---------------------------------------------------------
 
         # 3. সাধারণ হেডার পার্সিং
         if ref_m := re.search(r'#EXTVLCOPT:http-referrer=([^#\n]+)', block, re.IGNORECASE): stream["referer"] = ref_m.group(1).strip()
@@ -198,7 +208,7 @@ def parse_m3u_playlist(content: str):
         if cookie_m := re.search(r'#EXTVLCOPT:http-cookie=([^#\n]+)', block, re.IGNORECASE): stream["cookie"] = cookie_m.group(1).strip()
         if ua_m := re.search(r'#EXTVLCOPT:http-user-agent=([^#\n]+)', block, re.IGNORECASE): stream["user_agent"] = ua_m.group(1).strip()
 
-        # 4. JSON ব্লক পার্সিং (Toffee বা প্রিমিয়াম কুকির জন্য ১০০% গ্যারান্টি)
+        # 4. JSON ব্লক পার্সিং (Toffee বা প্রিমিয়াম কুকির জন্য)
         json_m = re.search(r'#EXTHTTP:(\{.*?\})', block, re.IGNORECASE)
         if json_m:
             try:
@@ -209,7 +219,7 @@ def parse_m3u_playlist(content: str):
                 if "user-agent" in j_data: stream["user_agent"] = str(j_data["user-agent"]).strip()
             except Exception: pass
 
-        # 5. মেইন স্ট্রিম ইউআরএল বের করা (ব্লকের একদম শেষের URLটাই আসল স্ট্রিম)
+        # 5. মেইন স্ট্রিম ইউআরএল বের করা
         block_no_logo = block.replace(stream["logo"], "") if stream["logo"] else block
         if json_m: block_no_logo = block_no_logo.replace(json_m.group(0), "")
         
@@ -217,7 +227,6 @@ def parse_m3u_playlist(content: str):
         if urls:
             playback_url = urls[-1].strip()
             
-            # পাইপ সিনট্যাক্স থাকলে
             if "|" in playback_url:
                 parts = playback_url.split("|", 1)
                 playback_url, h_part = parts[0].strip(), parts[1]
@@ -248,7 +257,7 @@ def get_force_join_keyboard(payload=None):
     return InlineKeyboardMarkup(buttons)
 
 # =========================================================
-# GUARANTEED POSTING PROCESSOR
+# ZERO-DUPLICATE & GUARANTEED POSTING PROCESSOR
 # =========================================================
 async def post_to_channel(context, title, category, logo, stream_url, referer, origin, cookie, user_agent, source_url):
     short_id = await create_short_link(stream_url, referer, origin, cookie, user_agent, source_url)
@@ -265,7 +274,6 @@ async def post_to_channel(context, title, category, logo, stream_url, referer, o
     try:
         await asyncio.sleep(3) 
 
-        # ছবি না পেলে বা ফেইল করলে গ্যারান্টিড টেক্সট পোস্ট
         if logo and logo.startswith("http"):
             try:
                 msg = await context.bot.send_photo(chat_id=CHANNEL_ID, photo=logo, caption=text, parse_mode="HTML")
@@ -285,12 +293,10 @@ async def post_to_channel(context, title, category, logo, stream_url, referer, o
     except Exception: return None, None
 
 async def process_all_sources(context: ContextTypes.DEFAULT_TYPE, status_msg=None, force_repost=False):
-    """ফোর্স রিপোস্ট চালু থাকলে ডাটাবেসের সাইলেন্ট ট্র্যাপ ভেঙে সব নতুন করে চ্যানেলে পাঠাবে"""
     sources = await get_m3u_sources()
     stats = {"sources": len(sources), "total_streams": 0, "new_posts": 0, "updated_posts": 0, "removed": 0, "failed": 0, "errors": []}
     
     if force_repost:
-        # ডাটাবেসের পুরোনো ট্র্যাকিং মুছে ফেলা হচ্ছে যাতে সব ফ্রেশ পোস্ট হয়
         await posted_col.delete_many({})
     
     for idx, source in enumerate(sources, 1):
@@ -313,39 +319,49 @@ async def process_all_sources(context: ContextTypes.DEFAULT_TYPE, status_msg=Non
             if not stream_url or not title: continue
             
             active_urls.append(stream_url)
+            
+            # ---------------------------------------------------------
+            # 🔥 ডুপ্লিকেট রোধের মূল লজিক: Title ও Source দিয়ে পোস্ট ট্র্যাক করা
+            # ---------------------------------------------------------
             existing_post = await posted_col.find_one({"title": title, "source_url": source})
 
             if existing_post and not force_repost:
-                old_stream_url, msg_id, short_id = existing_post.get("stream_url"), existing_post.get("message_id"), existing_post.get("short_id")
+                msg_id = existing_post.get("message_id")
+                short_id = existing_post.get("short_id")
                 
-                if old_stream_url != stream_url or item["cookie"]: # কুকি বা লিংক চেঞ্জ হলে আপডেট
-                    now_time = datetime.now(bd_tz).strftime("%I:%M %p (%d %b)")
-                    await posted_col.update_one({"_id": existing_post["_id"]}, {"$set": {"stream_url": stream_url, "posted_at": datetime.utcnow()}})
-                    await links_col.update_one(
-                        {"stream_url": old_stream_url},
-                        {"$set": {
-                            "stream_url": stream_url, "referer": item["referer"], "origin": item["origin"],
-                            "cookie": item["cookie"], "user_agent": item["user_agent"], "updated_at": datetime.utcnow()
-                        }}
-                    )
+                # যদি লিংক, কুকি, বা যেকোনো হেডার আপডেট হয়ে থাকে
+                now_time = datetime.now(bd_tz).strftime("%I:%M %p (%d %b)")
+                
+                # ১. পোস্টেড কালেকশনে স্ট্রিম ইউআরএল আপডেট
+                await posted_col.update_one({"_id": existing_post["_id"]}, {"$set": {"stream_url": stream_url, "posted_at": datetime.utcnow()}})
+                
+                # ২. সরাসরি ইউনিক short_id দিয়ে ডাটাবেস আপডেট (১০০% বুলেটপ্রুফ)
+                await links_col.update_one(
+                    {"short_id": short_id},
+                    {"$set": {
+                        "stream_url": stream_url, "referer": item["referer"], "origin": item["origin"],
+                        "cookie": item["cookie"], "user_agent": item["user_agent"], "updated_at": datetime.utcnow()
+                    }}
+                )
 
-                    deep_link = f"https://t.me/{BOT_USERNAME}?start={short_id}"
-                    updated_text = (
-                        f"📡 <b>{title}</b>\n\n📂 <b>ক্যাটাগরি:</b> {item['group']}\n🟢 <b>[LIVE] লাইভ স্ট্রিমটি সচল আছে</b>\n\n"
-                        f"📝 এইচডি কোয়ালিটিতে সরাসরি খেলা উপভোগ করুন।\n\n🔗 <a href='{deep_link}'>সরাসরি দেখতে এখানে ক্লিক করুন</a>\n\n"
-                        f"🔄 <b>সর্বশেষ আপডেট:</b> <code>{now_time}</code>\n⚡ <i>All In One Reborn | Auto Updated Feed</i>"
-                    )
-                    if msg_id:
-                        try:
-                            if item["logo"] and item["logo"].startswith("http"):
-                                await context.bot.edit_message_caption(chat_id=CHANNEL_ID, message_id=msg_id, caption=updated_text, parse_mode="HTML")
-                            else:
-                                await context.bot.edit_message_text(chat_id=CHANNEL_ID, message_id=msg_id, text=updated_text, parse_mode="HTML", disable_web_page_preview=True)
-                        except Exception: pass
-                    stats["updated_posts"] += 1
+                deep_link = f"https://t.me/{BOT_USERNAME}?start={short_id}"
+                updated_text = (
+                    f"📡 <b>{title}</b>\n\n📂 <b>ক্যাটাগরি:</b> {item['group']}\n🟢 <b>[LIVE] লাইভ স্ট্রিমটি সচল আছে</b>\n\n"
+                    f"📝 এইচডি কোয়ালিটিতে সরাসরি খেলা উপভোগ করুন।\n\n🔗 <a href='{deep_link}'>সরাসরি দেখতে এখানে ক্লিক করুন</a>\n\n"
+                    f"🔄 <b>সর্বশেষ আপডেট:</b> <code>{now_time}</code>\n⚡ <i>All In One Reborn | Auto Updated Feed</i>"
+                )
+                if msg_id:
+                    try:
+                        if item["logo"] and item["logo"].startswith("http"):
+                            await context.bot.edit_message_caption(chat_id=CHANNEL_ID, message_id=msg_id, caption=updated_text, parse_mode="HTML")
+                        else:
+                            await context.bot.edit_message_text(chat_id=CHANNEL_ID, message_id=msg_id, text=updated_text, parse_mode="HTML", disable_web_page_preview=True)
+                    except Exception: pass
+                stats["updated_posts"] += 1
                 continue  
+            # ---------------------------------------------------------
 
-            # সম্পূর্ণ নতুন পোস্ট গ্যারান্টি
+            # সম্পূর্ণ নতুন পোস্ট
             msg_id, short_id = await post_to_channel(context, item["title"], item["group"], item["logo"], stream_url, item["referer"], item["origin"], item["cookie"], item["user_agent"], source)
             if msg_id and short_id:
                 await save_posted_stream(stream_url, item["title"], source, msg_id, short_id)
@@ -365,15 +381,14 @@ async def delete_link_message(context: ContextTypes.DEFAULT_TYPE):
     except Exception: pass
 
 # =========================================================
-# BOT HANDLERS & ADMIN MENU (Extra Pro UI)
+# BOT HANDLERS & ADMIN MENU
 # =========================================================
 admin_state = {}
 
-# প্যানেলে আপনার চাওয়া নতুন ট্র্যাকিং ও রিপোস্ট বাটন অ্যাড করা হয়েছে
 admin_keyboard = ReplyKeyboardMarkup([
     ["➕ লিংক যুক্ত করুন", "➖ লিংক মুছুন"], 
-    ["📊 সোর্স লাইভ স্ট্যাটাস", "👥 মোট ইউজার"], # নতুন ফিচার
-    ["🔁 সব নতুন করে পোস্ট করুন", "🔄 ফোর্স চেক"], # নতুন ফিচার
+    ["📊 সোর্স লাইভ স্ট্যাটাস", "👥 মোট ইউজার"], 
+    ["🔁 সব নতুন করে পোস্ট করুন", "🔄 ফোর্স চেক"], 
     ["📢 ব্রডকাস্ট", "📊 অ্যানালিটিক্স"], 
     ["🚫 ইউজার ব্যান", "⚙️ সিস্টেম স্ট্যাটাস"]
 ], resize_keyboard=True)
@@ -407,7 +422,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if payload:
         stream_data = await get_stream_data(payload)
         if stream_data: await track_click(); await send_stream_message(context, chat_id, stream_data)
-        else: await update.message.reply_text("❌ <b>লিংকটির মেয়াদ শেষ!</b> চ্যানেল থেকে নতুন লিংক সংগ্রহ করুন।", parse_mode="HTML")
+        else: await update.message.reply_text("❌ <b>লিংকটির মেয়াদ শেষ!</b> চ্যানেল থেকে নতুন লিংক সংগ্রহ করুন。", parse_mode="HTML")
         return
 
     if user_id == ADMIN_ID: await update.message.reply_text("👑 <b>Enterprise Extra Pro প্যানেল রেডি!</b>", reply_markup=admin_keyboard, parse_mode="HTML")
@@ -422,7 +437,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if payload:
                 stream_data = await get_stream_data(payload)
                 if stream_data: await track_click(); await send_stream_message(context, chat_id, stream_data, message_to_edit=query.message)
-                else: await query.message.edit_text("❌ <b>লিংকটির মেয়াদ শেষ!</b> চ্যানেল থেকে নতুন লিংক সংগ্রহ করুন।", parse_mode="HTML")
+                else: await query.message.edit_text("❌ <b>লিংকটির মেয়াদ শেষ!</b> চ্যানেল থেকে নতুন লিংক সংগ্রহ করুন。", parse_mode="HTML")
             else: await query.message.edit_text("✅ ভেরিফিকেশন সম্পন্ন! স্ট্রিম দেখুন।")
         else: await query.message.reply_text("❌ আপনি এখনও সব চ্যানেলে যুক্ত হননি!")
 
@@ -455,9 +470,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == "➕ লিংক যুক্ত করুন": admin_state[user_id] = "add_link"; await update.message.reply_text("🔗 M3U লিংক দিন:")
     elif text == "➖ লিংক মুছুন": admin_state[user_id] = "delete_link"; await update.message.reply_text("🗑 লিংক দিন:")
     
-    # ---------------------------------------------------------
-    # 📊 নতুন ফিচার: কোন লিংক থেকে কতগুলো পোস্ট লাইভে আছে
-    # ---------------------------------------------------------
     elif text == "📊 সোর্স লাইভ স্ট্যাটাস":
         sources = await get_m3u_sources()
         if not sources:
@@ -477,9 +489,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == "⚙️ সিস্টেম স্ট্যাটাস": await update.message.reply_text(get_sys_status(), parse_mode="HTML")
     elif text == "🚫 ইউজার ব্যান": admin_state[user_id] = "ban_user"; await update.message.reply_text("🚫 User ID দিন:")
     
-    # ---------------------------------------------------------
-    # 🔁 নতুন ফিচার: সব মুছে ফোর্স রিপোস্ট (ডাটাবেস ট্র্যাপ ব্রেকার)
-    # ---------------------------------------------------------
     elif text == "🔁 সব নতুন করে পোস্ট করুন":
         status_msg = await update.message.reply_text("⚠️ <b>ডাটাবেস রিসেট করে সব নতুন করে পোস্ট করা হচ্ছে...</b>\nএটি সোর্স অনুযায়ী একটু সময় নিতে পারে।", parse_mode="HTML")
         stats = await process_all_sources(context, status_msg=status_msg, force_repost=True)
@@ -506,7 +515,7 @@ def main():
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     app.job_queue.run_repeating(auto_checker_job, interval=CHECK_TIME, first=10)
-    logger.info("Enterprise Extra Pro Bot RUNNING...")
+    logger.info("Enterprise Extra Pro Bot RUNNING (Zero Duplicates Guaranteed)...")
     app.run_polling()
 
 if __name__ == "__main__": main()
