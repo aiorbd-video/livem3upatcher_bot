@@ -1,3 +1,41 @@
+import hashlib
+import time
+import re
+import json
+from datetime import timedelta
+from config import START_TIME
+
+try:
+    import psutil
+    HAS_PSUTIL = True
+except ImportError:
+    HAS_PSUTIL = False
+
+USER_LIMIT = {}
+LIMIT_SECONDS = 3
+admin_state = {}
+
+def allow_user(user_id: int) -> bool:
+    now = time.time()
+    last = USER_LIMIT.get(user_id)
+    if last is not None and (now - last) < LIMIT_SECONDS:
+        return False
+    USER_LIMIT[user_id] = now
+    return True
+
+def get_sys_status() -> str:
+    uptime = str(timedelta(seconds=int(time.time() - START_TIME)))
+    if HAS_PSUTIL:
+        try:
+            ram = psutil.virtual_memory().percent
+            cpu = psutil.cpu_percent(interval=None)
+            return f"⏱ <b>Uptime:</b> {uptime}\n💽 <b>RAM:</b> {ram}%\n⚙️ <b>CPU:</b> {cpu}%"
+        except Exception: pass
+    return f"⏱ <b>Uptime:</b> {uptime}\n⚠️ <i>Install 'psutil' for CPU/RAM stats</i>"
+
+def make_stream_hash(stream_url: str) -> str:
+    return hashlib.md5(stream_url.encode()).hexdigest()
+
 def parse_m3u_playlist(content: str):
     streams = []
     clean = re.sub(r"#TOTAL-VS-MATCHES:[^\n#]*", "", content)
