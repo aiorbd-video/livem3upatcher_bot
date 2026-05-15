@@ -1,3 +1,4 @@
+# ফাইল: utils.py
 import hashlib
 import time
 import re
@@ -47,14 +48,19 @@ def parse_m3u_playlist(content: str):
         stream = {"title": f"Live Stream {idx}", "group": "লাইভ টিভি", "logo": "", "referer": "", "origin": "", "cookie": "", "user_agent": "", "url": ""}
         
         extinf_line = block.strip().splitlines()[0] if block.strip() else ""
-        if g_match := re.search(r'group-title="([^"]+)"', extinf_line, re.IGNORECASE): stream["group"] = g_match.group(1).strip()
-        if l_match := re.search(r'tvg-logo="([^"]+)"', extinf_line, re.IGNORECASE): stream["logo"] = l_match.group(1).strip()
         
-        # 🎯 টাইটেল থেকে tvg-logo বা অন্যান্য হাবিজাবি বাদ দেওয়ার স্মার্ট ফিল্টার
-        raw_title = extinf_line.split(",", 1)[-1].strip() if "," in extinf_line else extinf_line
-        while re.search(r'[a-zA-Z0-9\-]+="[^"]*"', raw_title) and "," in raw_title:
-            raw_title = raw_title.split(",", 1)[-1].strip()
-        stream["title"] = raw_title
+        # 🎯 ফিক্স ১: কোটেশন (" ") সহ এবং ছাড়া সব ধরনের গ্রুপ ও লোগো ধরবে
+        if g_match := re.search(r'group-title=(?:"([^"]+)"|([^\s,]+))', extinf_line, re.IGNORECASE): 
+            stream["group"] = (g_match.group(1) or g_match.group(2)).strip()
+            
+        if l_match := re.search(r'tvg-logo=(?:"([^"]+)"|([^\s,]+))', extinf_line, re.IGNORECASE): 
+            stream["logo"] = (l_match.group(1) or l_match.group(2)).strip()
+        
+        # 🎯 ফিক্স ২: টাইটেল থেকে সব হাবিজাবি ট্যাগ পুরোপুরি মুছে ফেলা
+        clean_title = re.sub(r'[a-zA-Z0-9\-]+=(?:"[^"]*"|[^\s,]+)', '', extinf_line) # সব tvg- ট্যাগ মুছবে
+        clean_title = re.sub(r'^:[-0-9\s]+', '', clean_title) # শুরুর :-1 মুছবে
+        clean_title = clean_title.lstrip(', ') # শুরুর কমা মুছবে
+        stream["title"] = clean_title.strip() if clean_title.strip() else f"Live Stream {idx}"
 
         # রেগুলার অপশন এক্সট্রাক্ট
         if ref_m := re.search(r"#EXTVLCOPT:http-referrer=([^#\n]+)", block, re.IGNORECASE): stream["referer"] = ref_m.group(1).strip()
@@ -73,10 +79,10 @@ def parse_m3u_playlist(content: str):
                 if "user-agent" in j_data: stream["user_agent"] = str(j_data["user-agent"]).strip()
             except Exception: pass
 
+        # URL এক্সট্রাক্ট
         urls = re.findall(r"(https?://[^\s#]+)", block.replace(stream["logo"], ""))
         if urls:
             playback_url = urls[-1].strip()
-            # পাইপ (|) দিয়ে যুক্ত প্রপার্টি এক্সট্রাক্ট
             if "|" in playback_url:
                 parts = playback_url.split("|", 1)
                 playback_url, h_part = parts[0].strip(), parts[1]
