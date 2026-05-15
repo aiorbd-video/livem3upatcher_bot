@@ -50,13 +50,26 @@ async def post_to_tg_channel(context, title, category, logo, short_id):
     except Exception: return None
 
 async def send_stream_message(context, chat_id, data, message_to_edit=None):
-    msg_text = f"✅ <b>স্ট্রিম অ্যাক্সেস অনুমোদিত!</b>\n\n🔗 <b>আপনার প্লেব্যাক লিংক:</b>\n<code>{data['stream_url']}</code>\n\n<i>This Bot is Developed by Ratul.</i>\n⏳ ৫ মিনিট পর মেসেজটি ডিলিট হয়ে যাবে।"
+    msg_text = f"✅ <b>স্ট্রিম অ্যাক্সেস অনুমোদিত!</b>\n\n🔗 <b>আপনার প্লেব্যাক লিংক:</b>\n<code>{data['stream_url']}</code>\n"
+    
+    if data.get("referer"):
+        msg_text += f"\n🌐 <b>Referer:</b>\n<code>{data['referer']}</code>"
+    if data.get("origin"):
+        msg_text += f"\n🌍 <b>Origin:</b>\n<code>{data['origin']}</code>"
+    if data.get("cookie"):
+        msg_text += f"\n🍪 <b>Cookie:</b>\n<code>{data['cookie']}</code>"
+    if data.get("user_agent"):
+        msg_text += f"\n🛡️ <b>User-Agent:</b>\n<code>{data['user_agent']}</code>"
+        
+    msg_text += "\n\n<i>This Bot is Developed by Ratul.</i>\n⏳ ৫ মিনিট পর মেসেজটি ডিলিট হয়ে যাবে।"
+
     if message_to_edit:
         await message_to_edit.edit_text(msg_text, parse_mode="HTML")
         msg_id = message_to_edit.message_id
     else:
         msg = await context.bot.send_message(chat_id=chat_id, text=msg_text, parse_mode="HTML")
         msg_id = msg.message_id
+        
     context.job_queue.run_once(delete_link_message, when=DELETE_TIME, data={"chat_id": chat_id, "message_id": msg_id})
 
 async def delete_link_message(context: ContextTypes.DEFAULT_TYPE):
