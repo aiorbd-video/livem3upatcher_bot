@@ -1,7 +1,6 @@
 import secrets
 from datetime import datetime
 from motor.motor_asyncio import AsyncIOMotorClient
-from pymongo.errors import OperationFailure
 from config import MONGO_URI
 from utils import make_stream_hash
 
@@ -15,34 +14,26 @@ links_col = db["short_links"]
 stats_col = db["app_stats"]
 
 async def create_indexes():
-    await users_col.create_index("user_id")
-    await users_col.create_index("is_banned")
-    await sources_col.create_index("url", unique=True)
+    # একটি সেফ ফাংশন যা এরর ইগনোর করবে এবং বট ক্র্যাশ হতে দেবে না
+    async def safe_create_index(collection, keys, **kwargs):
+        try:
+            await collection.create_index(keys, **kwargs)
+        except Exception as e:
+            print(f"Index creation skipped for {keys}: {e}")
+
+    await safe_create_index(users_col, "user_id")
+    await safe_create_index(users_col, "is_banned")
+    await safe_create_index(sources_col, "url", unique=True)
     
-    # ইনডেক্স কনফ্লিক্ট হ্যান্ডলিং
-    try:
-        await posted_col.create_index("stream_hash", unique=True)
-    except OperationFailure:
-        await posted_col.drop_index("stream_hash_1")
-        await posted_col.create_index("stream_hash", unique=True)
-        
-    await posted_col.create_index("source_url")
-    await posted_col.create_index([("title", 1), ("source_url", 1)])
+    await safe_create_index(posted_col, "stream_hash", unique=True)
+    await safe_create_index(posted_col, "source_url")
+    await safe_create_index(posted_col, [("title", 1), ("source_url", 1)])
     
-    try:
-        await links_col.create_index("short_id", unique=True)
-    except OperationFailure:
-        await links_col.drop_index("short_id_1")
-        await links_col.create_index("short_id", unique=True)
-        
-    await links_col.create_index("source_url")
-    await links_col.create_index("created_at", expireAfterSeconds=86400)
+    await safe_create_index(links_col, "short_id", unique=True)
+    await safe_create_index(links_col, "source_url")
+    await safe_create_index(links_col, "created_at", expireAfterSeconds=86400)
     
-    try:
-        await stats_col.create_index("stat_name", unique=True)
-    except OperationFailure:
-        await stats_col.drop_index("stat_name_1")
-        await stats_col.create_index("stat_name", unique=True)
+    await safe_create_index(stats_col, "stat_name", unique=True)
 
 async def add_user(user_id: int):
     await users_col.update_one(
