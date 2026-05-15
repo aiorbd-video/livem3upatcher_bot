@@ -69,7 +69,7 @@ async def delete_link_message(context: ContextTypes.DEFAULT_TYPE):
     job_data = context.job.data
     try:
         await context.bot.delete_message(chat_id=job_data["chat_id"], message_id=job_data["message_id"])
-        await context.bot.send_message(chat_id=job_data["chat_id"], text="⚠️ <b>মেয়াদ উত্তীর্ণ:</b>\nলিংকের মেয়াদ শেষ।", parse_mode="HTML")
+        await context.bot.send_message(chat_id=job_data["chat_id"], text="⚠️ <b>মেয়াদ উত্তীর্ণ:</b>\nলিংকের মেয়াদ শেষ। চ্যানেল থেকে পুনরায় ক্লিক করুন।", parse_mode="HTML")
     except Exception: pass
 
 async def fetch_m3u_content(url):
@@ -81,7 +81,7 @@ async def fetch_m3u_content(url):
 
 async def process_all_sources(context: ContextTypes.DEFAULT_TYPE, status_msg=None, force_repost=False):
     sources = await db.get_m3u_sources()
-    stats = {"sources": len(sources), "total_streams": 0, "new_posts": 0, "updated_posts": 0, "failed": 0}
+    stats = {"sources": len(sources), "total_streams": 0, "new_posts": 0, "updated_posts": 0, "failed": 0, "ended": 0}
     if force_repost: await db.posted_col.delete_many({})
 
     for src_data in sources:
@@ -93,10 +93,12 @@ async def process_all_sources(context: ContextTypes.DEFAULT_TYPE, status_msg=Non
         
         streams = utils.parse_m3u_playlist(content)
         stats["total_streams"] += len(streams)
+        active_hashes = []
 
         for item in streams:
             if not item.get("url") or not item.get("title"): continue
             stream_hash = utils.make_stream_hash(item["url"])
+            active_hashes.append(stream_hash)
             existing_post = await db.posted_col.find_one({"stream_hash": stream_hash})
 
             if existing_post and not force_repost:
@@ -111,6 +113,30 @@ async def process_all_sources(context: ContextTypes.DEFAULT_TYPE, status_msg=Non
                 await db.save_posted_stream(item["url"], item["title"], source, msg_id, short_id, target)
                 stats["new_posts"] += 1
             else: stats["failed"] += 1
+        
+        # 🎯 খেলা শেষ হয়ে যাওয়া লিংকগুলো খুঁজে মেসেজ সুন্দরভাবে আপডেট করার লজিক
+        if not force_repost:
+            cursor = db.posted_col.find({"source_url": source})
+            async for exp in cursor:
+                if exp["stream_hash"] not in active_hashes:
+                    msg_id = exp.get("message_id")
+                    if msg_id and target in ["tg", "both"]:
+                        ended_text = f"🚫 <b>স্ট্রিম সমাপ্ত (Stream Ended)</b>\n\n📡 <b>{exp.get('title', 'Unknown')}</b>\n\n🔴 <i>এই লাইভ স্ট্রিমটি এখন আর সচল নেই। পরবর্তী খেলার জন্য চ্যানেলে চোখ রাখুন।</i>\n⚡ <i>All In One Reborn</i>"
+                        try:
+                            # যদি আগের পোস্টে ছবি থাকে, তাহলে ক্যাপশন এডিট করবে
+                            await context.bot.edit_message_caption(chat_id=CHANNEL_ID, message_id=msg_id, caption=ended_text, parse_mode="HTML")
+                        except Exception:
+                            try:
+                                # ছবি না থাকলে সাধারণ টেক্সট এডিট করবে
+                                await context.bot.edit_message_text(chat_id=CHANNEL_ID, message_id=msg_id, text=ended_text, parse_mode="HTML", disable_web_page_preview=True)
+                            except Exception: pass
+                    
+                    # ডাটাবেস থেকে ডিলিট করে দেওয়া হচ্ছে
+                    await db.posted_col.delete_one({"_id": exp["_id"]})
+                    if exp.get("short_id"):
+                        await db.links_col.delete_one({"short_id": exp["short_id"]})
+                    stats["ended"] += 1
+
     return stats
 
 async def auto_checker_job(context: ContextTypes.DEFAULT_TYPE):
@@ -130,7 +156,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if stream_data:
             await db.track_click(stream_data.get("title"))
             await send_stream_message(context, update.effective_chat.id, stream_data)
-        else: await update.message.reply_text("❌ লিংকের মেয়াদ শেষ!")
+        else: await update.message.reply_text("❌ লিংকের মেয়াদ শেষ বা স্ট্রিমটি আর সচল নেই!")
         return
 
     if user_id == ADMIN_ID: await update.message.reply_text("👑 <b>Enterprise Extra Pro প্যানেল রেডি!</b>", reply_markup=admin_keyboard, parse_mode="HTML")
@@ -156,12 +182,10 @@ async def admin_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
     if user_id != ADMIN_ID: return
     state = utils.admin_state.get(user_id)
 
-    # State handlers (Cancel)
     if state and text == "❌ বাতিল করুন":
         utils.admin_state.pop(user_id, None)
         return await update.message.reply_text("❌ বাতিল করা হয়েছে।", reply_markup=admin_keyboard)
 
-    # State handlers logic
     if state == "select_target":
         if text in TARGET_MAP:
             utils.admin_state[user_id] = f"add_link_{TARGET_MAP[text]}"
@@ -205,7 +229,6 @@ async def admin_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
         await msg.edit_text(f"✅ ব্রডকাস্ট সফল: {sent} জন।")
         return utils.admin_state.pop(user_id, None)
 
-    # Command buttons
     if text == "➕ লিংক যুক্ত করুন":
         utils.admin_state[user_id] = "select_target"
         await update.message.reply_text("কোথায় পোস্ট করতে চান নির্বাচন করুন:", reply_markup=ReplyKeyboardMarkup([["Telegram Only", "Web Only", "Both"], ["❌ বাতিল করুন"]], resize_keyboard=True))
@@ -251,7 +274,7 @@ async def admin_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
     elif text == "🔄 ফোর্স চেক":
         status_msg = await update.message.reply_text("🔍 স্ক্যানিং শুরু হচ্ছে...")
         stats = await process_all_sources(context, status_msg=status_msg, force_repost=False)
-        await status_msg.edit_text(f"✅ স্ক্যান সম্পন্ন! নতুন পোস্ট: {stats['new_posts']}\nআপডেট: {stats['updated_posts']}")
+        await status_msg.edit_text(f"✅ স্ক্যান সম্পন্ন!\n\n🆕 নতুন পোস্ট: {stats['new_posts']}\n🔄 আপডেট: {stats['updated_posts']}\n🚫 সমাপ্ত স্ট্রিম: {stats['ended']}")
         
     elif text == "🔁 সব নতুন করে পোস্ট করুন":
         status_msg = await update.message.reply_text("⚠️ ডাটাবেস রিসেট করে সব নতুন করে পোস্ট করা হচ্ছে...")
