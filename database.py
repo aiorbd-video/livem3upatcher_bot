@@ -1,6 +1,7 @@
 import secrets
 from datetime import datetime
 from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo.errors import OperationFailure
 from config import MONGO_URI
 from utils import make_stream_hash
 
@@ -17,13 +18,31 @@ async def create_indexes():
     await users_col.create_index("user_id")
     await users_col.create_index("is_banned")
     await sources_col.create_index("url", unique=True)
-    await posted_col.create_index("stream_hash", unique=True)
+    
+    # ইনডেক্স কনফ্লিক্ট হ্যান্ডলিং
+    try:
+        await posted_col.create_index("stream_hash", unique=True)
+    except OperationFailure:
+        await posted_col.drop_index("stream_hash_1")
+        await posted_col.create_index("stream_hash", unique=True)
+        
     await posted_col.create_index("source_url")
     await posted_col.create_index([("title", 1), ("source_url", 1)])
-    await links_col.create_index("short_id", unique=True)
+    
+    try:
+        await links_col.create_index("short_id", unique=True)
+    except OperationFailure:
+        await links_col.drop_index("short_id_1")
+        await links_col.create_index("short_id", unique=True)
+        
     await links_col.create_index("source_url")
     await links_col.create_index("created_at", expireAfterSeconds=86400)
-    await stats_col.create_index("stat_name", unique=True)
+    
+    try:
+        await stats_col.create_index("stat_name", unique=True)
+    except OperationFailure:
+        await stats_col.drop_index("stat_name_1")
+        await stats_col.create_index("stat_name", unique=True)
 
 async def add_user(user_id: int):
     await users_col.update_one(
