@@ -51,16 +51,10 @@ async def post_to_tg_channel(context, title, category, logo, short_id):
 
 async def send_stream_message(context, chat_id, data, message_to_edit=None):
     msg_text = f"✅ <b>স্ট্রিম অ্যাক্সেস অনুমোদিত!</b>\n\n🔗 <b>আপনার প্লেব্যাক লিংক:</b>\n<code>{data['stream_url']}</code>\n"
-    
-    if data.get("referer"):
-        msg_text += f"\n🌐 <b>Referer:</b>\n<code>{data['referer']}</code>"
-    if data.get("origin"):
-        msg_text += f"\n🌍 <b>Origin:</b>\n<code>{data['origin']}</code>"
-    if data.get("cookie"):
-        msg_text += f"\n🍪 <b>Cookie:</b>\n<code>{data['cookie']}</code>"
-    if data.get("user_agent"):
-        msg_text += f"\n🛡️ <b>User-Agent:</b>\n<code>{data['user_agent']}</code>"
-        
+    if data.get("referer"): msg_text += f"\n🌐 <b>Referer:</b>\n<code>{data['referer']}</code>"
+    if data.get("origin"): msg_text += f"\n🌍 <b>Origin:</b>\n<code>{data['origin']}</code>"
+    if data.get("cookie"): msg_text += f"\n🍪 <b>Cookie:</b>\n<code>{data['cookie']}</code>"
+    if data.get("user_agent"): msg_text += f"\n🛡️ <b>User-Agent:</b>\n<code>{data['user_agent']}</code>"
     msg_text += "\n\n<i>This Bot is Developed by Ratul.</i>\n⏳ ৫ মিনিট পর মেসেজটি ডিলিট হয়ে যাবে।"
 
     if message_to_edit:
@@ -69,7 +63,6 @@ async def send_stream_message(context, chat_id, data, message_to_edit=None):
     else:
         msg = await context.bot.send_message(chat_id=chat_id, text=msg_text, parse_mode="HTML")
         msg_id = msg.message_id
-        
     context.job_queue.run_once(delete_link_message, when=DELETE_TIME, data={"chat_id": chat_id, "message_id": msg_id})
 
 async def delete_link_message(context: ContextTypes.DEFAULT_TYPE):
@@ -156,33 +149,111 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else: await query.message.reply_text("❌ আপনি এখনও সব চ্যানেলে যুক্ত হননি!")
 
 async def admin_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # --- নতুন সেফটি চেক শুরু ---
-    if not update.effective_user or not update.message or not update.message.text:
-        return
-    # --- সেফটি চেক শেষ ---
-
+    if not update.effective_user or not update.message or not update.message.text: return
     user_id = update.effective_user.id
     text = update.message.text.strip()
     
     if user_id != ADMIN_ID: return
     state = utils.admin_state.get(user_id)
 
-    if state == "select_target" and text in TARGET_MAP:
-        utils.admin_state[user_id] = f"add_link_{TARGET_MAP[text]}"
-        return await update.message.reply_text("🔗 এবার M3U লিংকটি দিন:", reply_markup=admin_keyboard)
+    # State handlers (Cancel)
+    if state and text == "❌ বাতিল করুন":
+        utils.admin_state.pop(user_id, None)
+        return await update.message.reply_text("❌ বাতিল করা হয়েছে।", reply_markup=admin_keyboard)
+
+    # State handlers logic
+    if state == "select_target":
+        if text in TARGET_MAP:
+            utils.admin_state[user_id] = f"add_link_{TARGET_MAP[text]}"
+            return await update.message.reply_text("🔗 এবার M3U লিংকটি দিন:", reply_markup=ReplyKeyboardMarkup([["❌ বাতিল করুন"]], resize_keyboard=True))
+        return await update.message.reply_text("❌ সঠিক অপশন নির্বাচন করুন।")
+        
     if state and state.startswith("add_link_"):
         await db.add_m3u_source(text, state.split("_", 2)[2])
         await update.message.reply_text("✅ সোর্স সেভ হয়েছে।", reply_markup=admin_keyboard)
         return utils.admin_state.pop(user_id, None)
 
+    if state == "delete_link":
+        s, l = await db.remove_m3u_source(text)
+        await update.message.reply_text(f"✅ সোর্স ও তার {s}+{l} ডেটা মুছেছে।", reply_markup=admin_keyboard)
+        return utils.admin_state.pop(user_id, None)
+
+    if state == "ban_user":
+        try:
+            await db.toggle_ban_user(int(text), True)
+            await update.message.reply_text("✅ ইউজার ব্যানড।", reply_markup=admin_keyboard)
+        except ValueError: await update.message.reply_text("❌ ভুল আইডি।")
+        return utils.admin_state.pop(user_id, None)
+
+    if state == "unban_user":
+        try:
+            ok = await db.toggle_ban_user(int(text), False)
+            await update.message.reply_text("✅ ইউজার আনব্যানড।" if ok else "❌ পাওয়া যায়নি।", reply_markup=admin_keyboard)
+        except ValueError: await update.message.reply_text("❌ ভুল আইডি।")
+        return utils.admin_state.pop(user_id, None)
+
+    if state == "broadcast":
+        users = await db.get_all_users()
+        sent = 0
+        msg = await update.message.reply_text("🚀 ব্রডকাস্ট হচ্ছে...")
+        for i in range(0, len(users), 30):
+            chunk = users[i:i+30]
+            tasks = [context.bot.send_message(chat_id=uid, text=text) for uid in chunk]
+            res = await asyncio.gather(*tasks, return_exceptions=True)
+            sent += sum(1 for x in res if not isinstance(x, Exception))
+            await asyncio.sleep(1)
+        await msg.edit_text(f"✅ ব্রডকাস্ট সফল: {sent} জন।")
+        return utils.admin_state.pop(user_id, None)
+
+    # Command buttons
     if text == "➕ লিংক যুক্ত করুন":
         utils.admin_state[user_id] = "select_target"
-        await update.message.reply_text("কোথায় পোস্ট করতে চান নির্বাচন করুন:", reply_markup=ReplyKeyboardMarkup([["Telegram Only", "Web Only", "Both"]], resize_keyboard=True))
+        await update.message.reply_text("কোথায় পোস্ট করতে চান নির্বাচন করুন:", reply_markup=ReplyKeyboardMarkup([["Telegram Only", "Web Only", "Both"], ["❌ বাতিল করুন"]], resize_keyboard=True))
+        
+    elif text == "➖ লিংক মুছুন":
+        utils.admin_state[user_id] = "delete_link"
+        await update.message.reply_text("🗑 লিংক দিন:", reply_markup=ReplyKeyboardMarkup([["❌ বাতিল করুন"]], resize_keyboard=True))
+        
+    elif text == "📊 সোর্স লাইভ স্ট্যাটাস":
+        sources = await db.get_m3u_sources()
+        if not sources: return await update.message.reply_text("❌ ডাটাবেসে কোনো লিংক নেই।")
+        status_text = "📊 <b>লাইভ সোর্স স্ট্যাটাস</b>\n\n"
+        for idx, src_data in enumerate(sources, 1):
+            src = src_data["url"]
+            count = await db.posted_col.count_documents({"source_url": src})
+            status_text += f"🔹 <b>সোর্স {idx} ({src_data['target'].upper()}):</b>\n🔗 <code>{src}</code>\n🟢 <b>লাইভ পোস্ট:</b> <code>{count}</code> টি\n\n"
+        await update.message.reply_text(status_text, parse_mode="HTML", disable_web_page_preview=True)
+        
     elif text == "👥 মোট ইউজার":
-        await update.message.reply_text(f"👥 ইউজার: {len(await db.get_all_users())} জন")
+        await update.message.reply_text(f"👥 মোট ইউজার: {len(await db.get_all_users())} জন")
+        
+    elif text == "📊 অ্যানালিটিক্স":
+        p, c = await db.get_stats()
+        top = await db.get_top_stream()
+        users = len(await db.get_all_users())
+        await update.message.reply_text(f"📊 <b>Enterprise Analytics</b>\n\n👥 Users: <code>{users}</code>\n📺 Posts: <code>{p}</code>\n🖱 Clicks: <code>{c}</code>\n🔥 Top Stream: <code>{top}</code>", parse_mode="HTML")
+        
+    elif text == "📢 ব্রডকাস্ট":
+        utils.admin_state[user_id] = "broadcast"
+        await update.message.reply_text("📝 মেসেজ লিখুন:", reply_markup=ReplyKeyboardMarkup([["❌ বাতিল করুন"]], resize_keyboard=True))
+        
+    elif text == "🚫 ইউজার ব্যান":
+        utils.admin_state[user_id] = "ban_user"
+        await update.message.reply_text("🚫 User ID দিন:", reply_markup=ReplyKeyboardMarkup([["❌ বাতিল করুন"]], resize_keyboard=True))
+        
+    elif text == "✅ আনব্যান":
+        utils.admin_state[user_id] = "unban_user"
+        await update.message.reply_text("✅ User ID দিন:", reply_markup=ReplyKeyboardMarkup([["❌ বাতিল করুন"]], resize_keyboard=True))
+        
     elif text == "⚙️ সিস্টেম স্ট্যাটাস":
         await update.message.reply_text(utils.get_sys_status(), parse_mode="HTML")
+        
     elif text == "🔄 ফোর্স চেক":
         status_msg = await update.message.reply_text("🔍 স্ক্যানিং শুরু হচ্ছে...")
         stats = await process_all_sources(context, status_msg=status_msg, force_repost=False)
-        await status_msg.edit_text(f"✅ স্ক্যান সম্পন্ন! নতুন পোস্ট: {stats['new_posts']}")
+        await status_msg.edit_text(f"✅ স্ক্যান সম্পন্ন! নতুন পোস্ট: {stats['new_posts']}\nআপডেট: {stats['updated_posts']}")
+        
+    elif text == "🔁 সব নতুন করে পোস্ট করুন":
+        status_msg = await update.message.reply_text("⚠️ ডাটাবেস রিসেট করে সব নতুন করে পোস্ট করা হচ্ছে...")
+        stats = await process_all_sources(context, status_msg=status_msg, force_repost=True)
+        await status_msg.edit_text(f"✅ ফোর্স রিপোস্ট সম্পন্ন! মোট পোস্ট: {stats['new_posts']}")
