@@ -50,7 +50,11 @@ def parse_m3u_playlist(content: str):
         if g_match := re.search(r'group-title="([^"]+)"', extinf_line, re.IGNORECASE): stream["group"] = g_match.group(1).strip()
         if l_match := re.search(r'tvg-logo="([^"]+)"', extinf_line, re.IGNORECASE): stream["logo"] = l_match.group(1).strip()
         
-        if "," in extinf_line: stream["title"] = extinf_line.split(",", 1)[-1].strip()
+        # 🎯 টাইটেল থেকে tvg-logo বা অন্যান্য হাবিজাবি বাদ দেওয়ার স্মার্ট ফিল্টার
+        raw_title = extinf_line.split(",", 1)[-1].strip() if "," in extinf_line else extinf_line
+        while re.search(r'[a-zA-Z0-9\-]+="[^"]*"', raw_title) and "," in raw_title:
+            raw_title = raw_title.split(",", 1)[-1].strip()
+        stream["title"] = raw_title
 
         # রেগুলার অপশন এক্সট্রাক্ট
         if ref_m := re.search(r"#EXTVLCOPT:http-referrer=([^#\n]+)", block, re.IGNORECASE): stream["referer"] = ref_m.group(1).strip()
