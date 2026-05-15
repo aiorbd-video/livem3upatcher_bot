@@ -143,8 +143,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else: await query.message.reply_text("❌ আপনি এখনও সব চ্যানেলে যুক্ত হননি!")
 
 async def admin_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # --- নতুন সেফটি চেক শুরু ---
+    if not update.effective_user or not update.message or not update.message.text:
+        return
+    # --- সেফটি চেক শেষ ---
+
     user_id = update.effective_user.id
     text = update.message.text.strip()
+    
     if user_id != ADMIN_ID: return
     state = utils.admin_state.get(user_id)
 
