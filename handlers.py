@@ -1,3 +1,4 @@
+# ফাইল: handlers.py (বা আপনার মূল বট ফাইল)
 import asyncio
 import aiohttp
 from datetime import datetime
@@ -33,21 +34,48 @@ def get_force_join_keyboard(payload=None):
     buttons.append([InlineKeyboardButton("🔄 জয়েন করেছি (চেক করুন)", callback_data=f"check_join|{payload}" if payload else "check_join")])
     return InlineKeyboardMarkup(buttons)
 
-async def post_to_tg_channel(context, title, category, logo, short_id):
+# 🎯 ক্যাপশন এবং বাটন জেনারেট করার নতুন ফাংশন
+def get_post_content(title, category, short_id):
     now_time = datetime.now(bd_tz).strftime("%I:%M %p (%d %b)")
-    deep_link = f"https://t.me/{BOT_USERNAME}?start={short_id}"
-    text = f"📡 <b>{title}</b>\n\n📂 <b>ক্যাটাগরি:</b> {category}\n🟢 <b>[LIVE] লাইভ স্ট্রিমটি সচল আছে</b>\n\n🔗 <a href='{deep_link}'>সরাসরি দেখতে এখানে ক্লিক করুন</a>\n\n🔄 <b>সর্বশেষ আপডেট:</b> <code>{now_time}</code>\n⚡ <i>All In One Reborn</i>"
+    text = f"📡 <b>{title}</b>\n\n📂 <b>ক্যাটাগরি:</b> {category}\n🟢 <b>[LIVE] লাইভ স্ট্রিমটি সচল আছে</b>\n\n🔄 <b>সর্বশেষ আপডেট:</b> <code>{now_time}</code>\n⚡ <i>All In One Reborn</i>"
+    
+    markup = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📺 সরাসরি দেখুন (Telegram)", url=f"https://t.me/{BOT_USERNAME}?start={short_id}")]
+    ])
+    return text, markup
+
+async def post_to_tg_channel(context, title, category, logo, short_id):
+    text, markup = get_post_content(title, category, short_id)
     try:
         await asyncio.sleep(1)
         if logo and logo.startswith("http"):
-            msg = await context.bot.send_photo(chat_id=CHANNEL_ID, photo=logo, caption=text, parse_mode="HTML")
+            msg = await context.bot.send_photo(chat_id=CHANNEL_ID, photo=logo, caption=text, reply_markup=markup, parse_mode="HTML")
         else:
-            msg = await context.bot.send_message(chat_id=CHANNEL_ID, text=text, parse_mode="HTML", disable_web_page_preview=True)
+            msg = await context.bot.send_message(chat_id=CHANNEL_ID, text=text, reply_markup=markup, parse_mode="HTML", disable_web_page_preview=True)
         return msg.message_id
     except RetryAfter as flood_err:
         await asyncio.sleep(flood_err.retry_after)
         return await post_to_tg_channel(context, title, category, logo, short_id)
-    except Exception: return None
+    except Exception as e: 
+        print(f"Error posting: {e}")
+        return None
+
+# 🎯 পুরনো মেসেজ এডিট করার নতুন ফাংশন
+async def edit_tg_channel_post(context, title, category, short_id, message_id):
+    text, markup = get_post_content(title, category, short_id)
+    try:
+        await asyncio.sleep(1)
+        # প্রথমে ক্যাপশন এডিট করার চেষ্টা করবে (যদি ছবি থাকে)
+        try:
+            await context.bot.edit_message_caption(chat_id=CHANNEL_ID, message_id=message_id, caption=text, reply_markup=markup, parse_mode="HTML")
+        except Exception:
+            # ছবি না থাকলে টেক্সট এডিট করবে
+            await context.bot.edit_message_text(chat_id=CHANNEL_ID, message_id=message_id, text=text, reply_markup=markup, parse_mode="HTML", disable_web_page_preview=True)
+    except RetryAfter as flood_err:
+        await asyncio.sleep(flood_err.retry_after)
+        await edit_tg_channel_post(context, title, category, short_id, message_id)
+    except Exception:
+        pass
 
 async def send_stream_message(context, chat_id, data, message_to_edit=None):
     msg_text = f"✅ <b>স্ট্রিম অ্যাক্সেস অনুমোদিত!</b>\n\n🔗 <b>আপনার প্লেব্যাক লিংক:</b>\n<code>{data['stream_url']}</code>\n"
@@ -79,6 +107,7 @@ async def fetch_m3u_content(url):
                 return await response.text() if response.status == 200 else None
     except Exception: return None
 
+# 🎯 কোর স্ক্যানিং এবং আপডেট ইঞ্জিন
 async def process_all_sources(context: ContextTypes.DEFAULT_TYPE, status_msg=None, force_repost=False):
     sources = await db.get_m3u_sources()
     stats = {"sources": len(sources), "total_streams": 0, "new_posts": 0, "updated_posts": 0, "failed": 0, "ended": 0}
@@ -93,45 +122,58 @@ async def process_all_sources(context: ContextTypes.DEFAULT_TYPE, status_msg=Non
         
         streams = utils.parse_m3u_playlist(content)
         stats["total_streams"] += len(streams)
-        active_hashes = []
+        
+        # 🎯 এখন হ্যাশের বদলে টাইটেল ট্র্যাক করা হবে
+        active_titles = []
 
         for item in streams:
             if not item.get("url") or not item.get("title"): continue
-            stream_hash = utils.make_stream_hash(item["url"])
-            active_hashes.append(stream_hash)
-            existing_post = await db.posted_col.find_one({"stream_hash": stream_hash})
+            title = item["title"]
+            active_titles.append(title)
+            
+            # ডেটাবেস থেকে চেক করা হচ্ছে এই টাইটেল আগে পোস্ট হয়েছে কি না
+            existing_post = await db.get_existing_post(title)
+
+            # নতুন শর্ট লিংক তৈরি
+            short_id = await db.create_short_link(item["url"], item["referer"], item["origin"], item["cookie"], item["user_agent"], source, title=title)
 
             if existing_post and not force_repost:
-                stats["updated_posts"] += 1
+                # 🎯 স্মার্ট আপডেট লজিক: লিংক চেঞ্জ হলেই শুধু আপডেট হবে
+                if existing_post.get("stream_url") != item["url"]:
+                    msg_id = existing_post.get("message_id")
+                    if msg_id and target in ["tg", "both"]:
+                        await edit_tg_channel_post(context, title, item["group"], short_id, msg_id)
+                    
+                    await db.save_posted_stream(item["url"], title, source, msg_id, short_id, target)
+                    stats["updated_posts"] += 1
                 continue
 
-            short_id = await db.create_short_link(item["url"], item["referer"], item["origin"], item["cookie"], item["user_agent"], source, title=item["title"])
+            # 🟢 নতুন পোস্ট
             msg_id = None
             if target in ["tg", "both"]:
-                msg_id = await post_to_tg_channel(context, item["title"], item["group"], item["logo"], short_id)
+                msg_id = await post_to_tg_channel(context, title, item["group"], item["logo"], short_id)
+            
             if msg_id or target == "web":
-                await db.save_posted_stream(item["url"], item["title"], source, msg_id, short_id, target)
+                await db.save_posted_stream(item["url"], title, source, msg_id, short_id, target)
                 stats["new_posts"] += 1
-            else: stats["failed"] += 1
+            else: 
+                stats["failed"] += 1
         
-        # 🎯 খেলা শেষ হয়ে যাওয়া লিংকগুলো খুঁজে মেসেজ সুন্দরভাবে আপডেট করার লজিক
+        # 🎯 খেলা শেষ হয়ে যাওয়া লিংকগুলো খুঁজে বের করা (টাইটেলের ভিত্তিতে)
         if not force_repost:
             cursor = db.posted_col.find({"source_url": source})
             async for exp in cursor:
-                if exp["stream_hash"] not in active_hashes:
+                if exp["title"] not in active_titles:
                     msg_id = exp.get("message_id")
                     if msg_id and target in ["tg", "both"]:
                         ended_text = f"🚫 <b>স্ট্রিম সমাপ্ত (Stream Ended)</b>\n\n📡 <b>{exp.get('title', 'Unknown')}</b>\n\n🔴 <i>এই লাইভ স্ট্রিমটি এখন আর সচল নেই। পরবর্তী খেলার জন্য চ্যানেলে চোখ রাখুন।</i>\n⚡ <i>All In One Reborn</i>"
                         try:
-                            # যদি আগের পোস্টে ছবি থাকে, তাহলে ক্যাপশন এডিট করবে
                             await context.bot.edit_message_caption(chat_id=CHANNEL_ID, message_id=msg_id, caption=ended_text, parse_mode="HTML")
                         except Exception:
                             try:
-                                # ছবি না থাকলে সাধারণ টেক্সট এডিট করবে
                                 await context.bot.edit_message_text(chat_id=CHANNEL_ID, message_id=msg_id, text=ended_text, parse_mode="HTML", disable_web_page_preview=True)
                             except Exception: pass
                     
-                    # ডাটাবেস থেকে ডিলিট করে দেওয়া হচ্ছে
                     await db.posted_col.delete_one({"_id": exp["_id"]})
                     if exp.get("short_id"):
                         await db.links_col.delete_one({"short_id": exp["short_id"]})
