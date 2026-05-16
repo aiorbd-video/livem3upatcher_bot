@@ -1,3 +1,4 @@
+# ফাইল: database.py
 import secrets
 from datetime import datetime
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -14,20 +15,19 @@ links_col = db["short_links"]
 stats_col = db["app_stats"]
 
 async def create_indexes():
-    # একটি সেফ ফাংশন যা এরর ইগনোর করবে এবং বট ক্র্যাশ হতে দেবে না
     async def safe_create_index(collection, keys, **kwargs):
         try:
             await collection.create_index(keys, **kwargs)
         except Exception as e:
-            print(f"Index creation skipped for {keys}: {e}")
+            pass
 
     await safe_create_index(users_col, "user_id")
     await safe_create_index(users_col, "is_banned")
     await safe_create_index(sources_col, "url", unique=True)
     
-    await safe_create_index(posted_col, "stream_hash", unique=True)
+    # 🎯 stream_hash এর বদলে title কে প্রায়োরিটি দেওয়া হলো
+    await safe_create_index(posted_col, "title")
     await safe_create_index(posted_col, "source_url")
-    await safe_create_index(posted_col, [("title", 1), ("source_url", 1)])
     
     await safe_create_index(links_col, "short_id", unique=True)
     await safe_create_index(links_col, "source_url")
@@ -69,10 +69,16 @@ async def remove_m3u_source(url: str):
 async def get_m3u_sources():
     return [{"url": doc["url"], "target": doc.get("target", "both")} async for doc in sources_col.find({})]
 
+# 🎯 ম্যাজিক ফাংশন: আগে পোস্ট হয়েছে কি না চেক করার জন্য
+async def get_existing_post(title: str):
+    return await posted_col.find_one({"title": title})
+
 async def save_posted_stream(stream_url: str, title: str, source_url: str, message_id: int, short_id: str, target: str):
     stream_hash = make_stream_hash(stream_url)
+    
+    # 🎯 টাইটেল দিয়ে চেক করে আপডেট করবে, হ্যাশ দিয়ে নয়
     result = await posted_col.update_one(
-        {"stream_hash": stream_hash},
+        {"title": title},
         {
             "$set": {
                 "title": title, "stream_hash": stream_hash, "stream_url": stream_url,
