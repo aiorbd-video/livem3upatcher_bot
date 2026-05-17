@@ -73,7 +73,8 @@ async def get_m3u_sources():
 async def get_existing_post(title: str):
     return await posted_col.find_one({"title": title})
 
-async def save_posted_stream(stream_url: str, title: str, source_url: str, message_id: int, short_id: str, target: str):
+# 🎯 আপডেট: ফাংশনে logo প্যারামিটার যুক্ত করা হয়েছে এবং ডাটাবেসে সেভ করা হচ্ছে
+async def save_posted_stream(stream_url: str, title: str, source_url: str, message_id: int, short_id: str, target: str, logo: str = ""):
     stream_hash = make_stream_hash(stream_url)
     
     # 🎯 টাইটেল দিয়ে চেক করে আপডেট করবে, হ্যাশ দিয়ে নয়
@@ -84,6 +85,7 @@ async def save_posted_stream(stream_url: str, title: str, source_url: str, messa
                 "title": title, "stream_hash": stream_hash, "stream_url": stream_url,
                 "source_url": source_url, "message_id": message_id, "short_id": short_id,
                 "target": target, "posted_at": datetime.utcnow(),
+                "logo": logo # 🎯 ম্যাজিক ফিক্স: ডাটাবেসে লোগো সেভ করা হচ্ছে
             }
         },
         upsert=True,
