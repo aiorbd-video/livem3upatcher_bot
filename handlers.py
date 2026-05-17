@@ -1,4 +1,4 @@
-# ফাইল: handlers.py (বা আপনার মূল বট ফাইল)
+# ফাইল: handlers.py
 import asyncio
 import aiohttp
 from datetime import datetime
@@ -34,7 +34,6 @@ def get_force_join_keyboard(payload=None):
     buttons.append([InlineKeyboardButton("🔄 জয়েন করেছি (চেক করুন)", callback_data=f"check_join|{payload}" if payload else "check_join")])
     return InlineKeyboardMarkup(buttons)
 
-# 🎯 ক্যাপশন এবং বাটন জেনারেট করার নতুন ফাংশন
 def get_post_content(title, category, short_id):
     now_time = datetime.now(bd_tz).strftime("%I:%M %p (%d %b)")
     text = f"📡 <b>{title}</b>\n\n📂 <b>ক্যাটাগরি:</b> {category}\n🟢 <b>[LIVE] লাইভ স্ট্রিমটি সচল আছে</b>\n\n🔄 <b>সর্বশেষ আপডেট:</b> <code>{now_time}</code>\n⚡ <i>All In One Reborn</i>"
@@ -60,16 +59,13 @@ async def post_to_tg_channel(context, title, category, logo, short_id):
         print(f"Error posting: {e}")
         return None
 
-# 🎯 পুরনো মেসেজ এডিট করার নতুন ফাংশন
 async def edit_tg_channel_post(context, title, category, short_id, message_id):
     text, markup = get_post_content(title, category, short_id)
     try:
         await asyncio.sleep(1)
-        # প্রথমে ক্যাপশন এডিট করার চেষ্টা করবে (যদি ছবি থাকে)
         try:
             await context.bot.edit_message_caption(chat_id=CHANNEL_ID, message_id=message_id, caption=text, reply_markup=markup, parse_mode="HTML")
         except Exception:
-            # ছবি না থাকলে টেক্সট এডিট করবে
             await context.bot.edit_message_text(chat_id=CHANNEL_ID, message_id=message_id, text=text, reply_markup=markup, parse_mode="HTML", disable_web_page_preview=True)
     except RetryAfter as flood_err:
         await asyncio.sleep(flood_err.retry_after)
@@ -122,8 +118,6 @@ async def process_all_sources(context: ContextTypes.DEFAULT_TYPE, status_msg=Non
         
         streams = utils.parse_m3u_playlist(content)
         stats["total_streams"] += len(streams)
-        
-        # 🎯 এখন হ্যাশের বদলে টাইটেল ট্র্যাক করা হবে
         active_titles = []
 
         for item in streams:
@@ -131,35 +125,31 @@ async def process_all_sources(context: ContextTypes.DEFAULT_TYPE, status_msg=Non
             title = item["title"]
             active_titles.append(title)
             
-            # ডেটাবেস থেকে চেক করা হচ্ছে এই টাইটেল আগে পোস্ট হয়েছে কি না
             existing_post = await db.get_existing_post(title)
-
-            # নতুন শর্ট লিংক তৈরি
             short_id = await db.create_short_link(item["url"], item["referer"], item["origin"], item["cookie"], item["user_agent"], source, title=title)
 
             if existing_post and not force_repost:
-                # 🎯 স্মার্ট আপডেট লজিক: লিংক চেঞ্জ হলেই শুধু আপডেট হবে
                 if existing_post.get("stream_url") != item["url"]:
                     msg_id = existing_post.get("message_id")
                     if msg_id and target in ["tg", "both"]:
                         await edit_tg_channel_post(context, title, item["group"], short_id, msg_id)
                     
-                    await db.save_posted_stream(item["url"], title, source, msg_id, short_id, target)
+                    # 🎯 ফিক্স: লোগো আপডেট করা হচ্ছে
+                    await db.save_posted_stream(item["url"], title, source, msg_id, short_id, target, item.get("logo", ""))
                     stats["updated_posts"] += 1
                 continue
 
-            # 🟢 নতুন পোস্ট
             msg_id = None
             if target in ["tg", "both"]:
                 msg_id = await post_to_tg_channel(context, title, item["group"], item["logo"], short_id)
             
             if msg_id or target == "web":
-                await db.save_posted_stream(item["url"], title, source, msg_id, short_id, target)
+                # 🎯 ফিক্স: নতুন পোস্টে লোগো সেভ করা হচ্ছে
+                await db.save_posted_stream(item["url"], title, source, msg_id, short_id, target, item.get("logo", ""))
                 stats["new_posts"] += 1
             else: 
                 stats["failed"] += 1
         
-        # 🎯 খেলা শেষ হয়ে যাওয়া লিংকগুলো খুঁজে বের করা (টাইটেলের ভিত্তিতে)
         if not force_repost:
             cursor = db.posted_col.find({"source_url": source})
             async for exp in cursor:
