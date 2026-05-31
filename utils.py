@@ -1,5 +1,7 @@
 import hashlib
 import time
+import re
+import json
 from datetime import timedelta
 import aiohttp
 from config import START_TIME, HEADERS
@@ -45,91 +47,89 @@ async def fetch_m3u_content(url: str):
         print(f"Fetch Error: {e}")
     return None
 
+def get_vlc_opt(string: str, opt_name: str) -> str:
+    """জোড়া লাগানো লাইন থেকে সেফলি VLC অপশন বের করার ফাংশন"""
+    if opt_name in string:
+        val = string.split(opt_name)[1]
+        # অপশনটি পরবর্তী ট্যাগ বা লিংকের আগ পর্যন্ত কাটবে
+        match = re.search(r'(#|http://|https://)', val)
+        if match:
+            return val[:match.start()].strip()
+        return val.strip()
+    return ""
+
 def parse_m3u_playlist(content: str):
     streams = []
     
-    # 🎯 হ্যাং হওয়া এড়াতে সব ভারী রেগেক্স বাদ! শুধু স্প্লিট ব্যবহার করা হয়েছে
-    content = content.replace("#EXTINF", "\n#EXTINF")
-    lines = [line.strip() for line in content.split("\n") if line.strip()]
+    # 🎯 হ্যাং হওয়া এড়াতে অপ্রয়োজনীয় ডাটা ক্লিন করে সরাসরি #EXTINF দিয়ে স্প্লিট
+    content = content.replace("#TOTAL-VS-MATCHES:", " ")
+    content = content.replace("#LAST-UPDATED:", " ")
+    content = content.replace("#EXTM3U", "")
     
-    current_stream = None
+    blocks = content.split("#EXTINF")
 
-    for line in lines:
-        if line.startswith("#EXTM3U") or line.startswith("#TOTAL") or line.startswith("#LAST"):
+    for idx, block in enumerate(blocks):
+        if not block.strip(): 
             continue
             
-        if line.startswith("#EXTINF"):
-            # আগের স্ট্রিম সেভ করা
-            if current_stream and current_stream.get("url"):
-                streams.append(current_stream)
-                
-            current_stream = {"title": "Unknown", "group": "লাইভ টিভি", "logo": "", "referer": "", "origin": "", "cookie": "", "user_agent": "", "url": ""}
-            
-            # সেফ গ্রুপ এবং লোগো এক্সট্রাকশন (No Hang Guarantee)
-            if 'group-title="' in line:
-                current_stream["group"] = line.split('group-title="')[1].split('"')[0]
-            elif "group-title=" in line:
-                current_stream["group"] = line.split('group-title=')[1].split()[0].split(',')[0]
-                
-            if 'tvg-logo="' in line:
-                current_stream["logo"] = line.split('tvg-logo="')[1].split('"')[0]
-            elif "tvg-logo=" in line:
-                current_stream["logo"] = line.split('tvg-logo=')[1].split()[0].split(',')[0]
+        stream = {"title": f"Live Stream {idx}", "group": "লাইভ টিভি", "logo": "", "referer": "", "origin": "", "cookie": "", "user_agent": "", "url": ""}
+        
+        # 1. গ্রুপ ও লোগো এক্সট্রাকশন
+        if 'group-title="' in block:
+            stream["group"] = block.split('group-title="')[1].split('"')[0]
+        if 'tvg-logo="' in block:
+            stream["logo"] = block.split('tvg-logo="')[1].split('"')[0]
 
-            # সেফ টাইটেল এক্সট্রাকশন (লোগোর লিংকের কমা বাইপাস)
-            if '",' in line:
-                raw_title = line.split('",')[-1].strip()
-            else:
-                raw_title = line.split(',', 1)[-1].strip() if ',' in line else "Live Stream"
+        # 2. টাইটেল এবং লিংকের বাউন্ডারি বের করা
+        if ',' in block:
+            after_comma = block.split(',', 1)[1]
             
-            current_stream["title"] = raw_title
+            # টাইটেল কোথায় শেষ আর হেডার/লিংক কোথায় শুরু তা খোঁজা
+            boundary_match = re.search(r'(#EXTVLCOPT|#EXTHTTP|http://|https://)', after_comma)
             
-        elif current_stream: # যদি EXTINF ব্লকের ভেতরে থাকি
-            if line.startswith("#EXTVLCOPT:http-referrer="):
-                current_stream["referer"] = line.split("=", 1)[1].strip()
-            elif line.startswith("#EXTVLCOPT:http-origin="):
-                current_stream["origin"] = line.split("=", 1)[1].strip()
-            elif line.startswith("#EXTVLCOPT:http-cookie="):
-                current_stream["cookie"] = line.split("=", 1)[1].strip()
-            elif line.startswith("#EXTVLCOPT:http-user-agent="):
-                current_stream["user_agent"] = line.split("=", 1)[1].strip()
-            
-            # Toffee / SonyLiv JSON HTTP Header Handle (Fast string search)
-            elif line.startswith("#EXTHTTP:"):
-                try:
-                    json_str = line.split("#EXTHTTP:")[1]
-                    if "}http" in json_str:
-                        j_part, url_part = json_str.split("}http", 1)
-                        j_part += "}" 
-                        url_part = "http" + url_part
-                        
-                        import json
-                        h_data = {k.lower(): v for k, v in json.loads(j_part).items()}
-                        if "cookie" in h_data: current_stream["cookie"] = str(h_data["cookie"])
-                        if "referer" in h_data: current_stream["referer"] = str(h_data["referer"])
-                        if "origin" in h_data: current_stream["origin"] = str(h_data["origin"])
-                        if "user-agent" in h_data: current_stream["user_agent"] = str(h_data["user-agent"])
-                        
-                        current_stream["url"] = url_part.strip()
-                except Exception as e:
-                    print(f"JSON Parse Error: {e}")
-                    
-            elif line.startswith("http"):
-                playback_url = line
-                if "|" in playback_url:
-                    parts = playback_url.split("|", 1)
-                    playback_url = parts[0].strip()
-                    h_part = parts[1]
-                    
-                    if "Referer=" in h_part: current_stream["referer"] = h_part.split("Referer=")[1].split("&")[0].strip()
-                    if "Origin=" in h_part: current_stream["origin"] = h_part.split("Origin=")[1].split("&")[0].strip()
-                    if "Cookie=" in h_part: current_stream["cookie"] = h_part.split("Cookie=")[1].split("&")[0].strip()
-                    if "User-Agent=" in h_part: current_stream["user_agent"] = h_part.split("User-Agent=")[1].split("&")[0].strip()
-                    
-                current_stream["url"] = playback_url
+            if boundary_match:
+                boundary_idx = boundary_match.start()
+                stream["title"] = after_comma[:boundary_idx].strip()
+                rest_of_string = after_comma[boundary_idx:]
+                
+                # 3. হেডার ও কুকি এক্সট্রাকশন
+                stream["referer"] = get_vlc_opt(rest_of_string, "#EXTVLCOPT:http-referrer=")
+                stream["origin"] = get_vlc_opt(rest_of_string, "#EXTVLCOPT:http-origin=")
+                stream["cookie"] = get_vlc_opt(rest_of_string, "#EXTVLCOPT:http-cookie=")
+                stream["user_agent"] = get_vlc_opt(rest_of_string, "#EXTVLCOPT:http-user-agent=")
 
-    # শেষের স্ট্রিমটি যুক্ত করা
-    if current_stream and current_stream.get("url"):
-        streams.append(current_stream)
+                # JSON কুকি হ্যান্ডেলিং (#EXTHTTP)
+                if "#EXTHTTP:{" in rest_of_string:
+                    try:
+                        j_part = rest_of_string.split("#EXTHTTP:")[1]
+                        if "}http" in j_part:
+                            j_str = j_part.split("}http")[0] + "}"
+                            h_data = {k.lower(): v for k, v in json.loads(j_str).items()}
+                            if "cookie" in h_data: stream["cookie"] = str(h_data["cookie"])
+                            if "referer" in h_data: stream["referer"] = str(h_data["referer"])
+                            if "origin" in h_data: stream["origin"] = str(h_data["origin"])
+                            if "user-agent" in h_data: stream["user_agent"] = str(h_data["user-agent"])
+                    except Exception as e:
+                        print(f"JSON Parsing failed: {e}")
+
+                # 4. ফাইনাল প্লেব্যাক লিংক বের করা
+                last_http_idx = max(rest_of_string.rfind("http://"), rest_of_string.rfind("https://"))
+                if last_http_idx != -1:
+                    raw_url = rest_of_string[last_http_idx:].strip()
+                    
+                    # পাইপ (|) অপশন থাকলে ক্লিন করা
+                    if "|" in raw_url:
+                        parts = raw_url.split("|", 1)
+                        raw_url = parts[0].strip()
+                        h_part = parts[1]
+                        if "Referer=" in h_part: stream["referer"] = h_part.split("Referer=")[1].split("&")[0].strip()
+                        if "Origin=" in h_part: stream["origin"] = h_part.split("Origin=")[1].split("&")[0].strip()
+                        if "Cookie=" in h_part: stream["cookie"] = h_part.split("Cookie=")[1].split("&")[0].strip()
+                        if "User-Agent=" in h_part: stream["user_agent"] = h_part.split("User-Agent=")[1].split("&")[0].strip()
+                    
+                    stream["url"] = raw_url
+
+        if stream["url"]:
+            streams.append(stream)
 
     return streams
