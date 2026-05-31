@@ -8,8 +8,12 @@ import database as db
 from config import BOT_USERNAME, CHANNEL_ID, ADMIN_ID, DELETE_TIME, bd_tz, FORCE_CHANNELS, HEADERS
 import utils
 
+# 🎯 কাস্টম ম্যাচ সেভ করার জন্য টেম্পোরারি স্টোরেজ
+custom_match_data = {}
+
 admin_keyboard = ReplyKeyboardMarkup([
     ["➕ লিংক যুক্ত করুন", "➖ লিংক মুছুন"],
+    ["➕ কাস্টম ম্যাচ"], # 🎯 নতুন বাটন
     ["📊 সোর্স লাইভ স্ট্যাটাস", "👥 মোট ইউজার"],
     ["🔁 সব নতুন করে পোস্ট করুন", "🔄 ফোর্স চেক"],
     ["📢 ব্রডকাস্ট", "📊 অ্যানালিটিক্স"],
@@ -55,12 +59,9 @@ async def post_to_tg_channel(context, title, category, logo, short_id):
         await asyncio.sleep(2)
         if logo and logo.startswith("http"):
             try:
-                # লোগো থাকলে ছবিসহ পোস্ট করার চেষ্টা
                 msg = await context.bot.send_photo(chat_id=CHANNEL_ID, photo=logo, caption=text, reply_markup=markup, parse_mode="HTML")
                 return msg.message_id
-            except Exception: 
-                # লোগো লোড না হলে বা টেলিগ্রাম ব্লক করলে সরাসরি টেক্সট পোস্ট
-                pass
+            except Exception: pass
             
         msg = await context.bot.send_message(chat_id=CHANNEL_ID, text=text, reply_markup=markup, parse_mode="HTML", disable_web_page_preview=True)
         return msg.message_id
@@ -141,7 +142,6 @@ async def process_all_sources(context: ContextTypes.DEFAULT_TYPE, status_msg=Non
             title = item["title"]
             active_titles.append(title)
             
-            # 🎯 হেডার প্যাক করা হচ্ছে
             headers = {
                 "referer": item.get("referer", ""),
                 "origin": item.get("origin", ""),
@@ -169,9 +169,8 @@ async def process_all_sources(context: ContextTypes.DEFAULT_TYPE, status_msg=Non
                     )
 
                 if target in ["tg", "both"] and msg_id:
-                    await edit_tg_channel_post(context, title, item["group"], short_id_exist, msg_id)
+                    await edit_tg_channel_post(context, title, item.get("group", "লাইভ টিভি"), short_id_exist, msg_id)
                 
-                # 🎯 হেডারসহ ডাটাবেস আপডেট
                 await db.save_posted_stream(item["url"], title, source, msg_id, short_id_exist, target, item.get("logo", ""), headers=headers)
                 stats["updated_posts"] += 1
                 continue
@@ -179,10 +178,9 @@ async def process_all_sources(context: ContextTypes.DEFAULT_TYPE, status_msg=Non
             short_id = await db.create_short_link(item["url"], headers["referer"], headers["origin"], headers["cookie"], headers["user_agent"], source, title=title)
             msg_id = None
             if target in ["tg", "both"]: 
-                msg_id = await post_to_tg_channel(context, title, item["group"], item.get("logo", ""), short_id)
+                msg_id = await post_to_tg_channel(context, title, item.get("group", "লাইভ টিভি"), item.get("logo", ""), short_id)
             
             if msg_id or target == "web":
-                # 🎯 হেডারসহ নতুন পোস্ট সেভ
                 await db.save_posted_stream(item["url"], title, source, msg_id, short_id, target, item.get("logo", ""), headers=headers)
                 stats["new_posts"] += 1
             else: 
@@ -207,6 +205,7 @@ async def process_all_sources(context: ContextTypes.DEFAULT_TYPE, status_msg=Non
 
 async def auto_checker_job(context: ContextTypes.DEFAULT_TYPE): await process_all_sources(context)
 
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if await db.is_user_banned(user_id): return await update.message.reply_text("🚫 আপনি নিষিদ্ধ (Banned)!")
@@ -227,6 +226,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id == ADMIN_ID: await update.message.reply_text("👑 <b>Enterprise Extra Pro প্যানেল রেডি!</b>", reply_markup=admin_keyboard, parse_mode="HTML")
     else: await update.message.reply_text("✅ <b>স্বাগতম!</b> চ্যানেল থেকে লিংকে ক্লিক করে লাইভ দেখুন।", parse_mode="HTML")
 
+
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -239,6 +239,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else: await query.message.edit_text("✅ ভেরিফিকেশন সম্পন্ন!")
         else: await query.message.reply_text("❌ আপনি এখনও সব চ্যানেলে যুক্ত হননি!")
 
+
 async def admin_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.effective_user or not update.message or not update.message.text: return
     user_id = update.effective_user.id
@@ -247,10 +248,94 @@ async def admin_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
     if user_id != ADMIN_ID: return
     state = utils.admin_state.get(user_id)
 
-    if state and text == "❌ বাতিল করুন":
+    if text == "❌ বাতিল করুন" or (state and text == "❌ বাতিল করুন"):
         utils.admin_state.pop(user_id, None)
-        return await update.message.reply_text("❌ বাতিল করা হয়েছে।", reply_markup=admin_keyboard)
+        custom_match_data.pop(user_id, None)
+        return await update.message.reply_text("❌ প্রক্রিয়া বাতিল করা হয়েছে।", reply_markup=admin_keyboard)
 
+    # ==========================================
+    # 🌟 কাস্টম ম্যাচ প্রসেসিং (DASH/HLS/DRM/Time)
+    # ==========================================
+    if text == "➕ কাস্টম ম্যাচ":
+        utils.admin_state[user_id] = "cm_title"
+        custom_match_data[user_id] = {}
+        return await update.message.reply_text("📝 কাস্টম ম্যাচের টাইটেল দিন:", reply_markup=ReplyKeyboardMarkup([["❌ বাতিল করুন"]], resize_keyboard=True))
+
+    elif state == "cm_title":
+        custom_match_data[user_id]["title"] = text
+        utils.admin_state[user_id] = "cm_type"
+        return await update.message.reply_text("⚙️ স্ট্রিম টাইপ নির্বাচন করুন:", reply_markup=ReplyKeyboardMarkup([["HLS (m3u8)", "DASH (mpd)"], ["❌ বাতিল করুন"]], resize_keyboard=True))
+
+    elif state == "cm_type":
+        if text not in ["HLS (m3u8)", "DASH (mpd)"]: return await update.message.reply_text("সঠিক অপশন নির্বাচন করুন।")
+        custom_match_data[user_id]["type"] = "dash" if "DASH" in text else "hls"
+        utils.admin_state[user_id] = "cm_url"
+        return await update.message.reply_text("🔗 ভিডিও URL (m3u8/mpd) দিন:", reply_markup=ReplyKeyboardMarkup([["❌ বাতিল করুন"]], resize_keyboard=True))
+
+    elif state == "cm_url":
+        custom_match_data[user_id]["url"] = text
+        if custom_match_data[user_id]["type"] == "dash":
+            utils.admin_state[user_id] = "cm_drm"
+            return await update.message.reply_text("🔐 Clearkey DRM দিন (Format: KeyID:Key)\nঅথবা না থাকলে N লিখুন:", reply_markup=ReplyKeyboardMarkup([["N", "❌ বাতিল করুন"]], resize_keyboard=True))
+        else:
+            utils.admin_state[user_id] = "cm_time"
+            return await update.message.reply_text("⏱️ স্টার্ট ও এন্ড টাইম দিন (Format: 08:00 PM - 10:00 PM)\nঅথবা না থাকলে N লিখুন:", reply_markup=ReplyKeyboardMarkup([["N", "❌ বাতিল করুন"]], resize_keyboard=True))
+
+    elif state == "cm_drm":
+        drm = "" if text.upper() == "N" else text
+        if drm and ":" in drm:
+            custom_match_data[user_id]["drm_key_id"] = drm.split(":")[0].strip()
+            custom_match_data[user_id]["drm_key"] = drm.split(":", 1)[1].strip()
+        utils.admin_state[user_id] = "cm_time"
+        return await update.message.reply_text("⏱️ স্টার্ট ও এন্ড টাইম দিন (Format: 08:00 PM - 10:00 PM)\nঅথবা না থাকলে N লিখুন:", reply_markup=ReplyKeyboardMarkup([["N", "❌ বাতিল করুন"]], resize_keyboard=True))
+
+    elif state == "cm_time":
+        time_str = "" if text.upper() == "N" else text
+        if "-" in time_str:
+            custom_match_data[user_id]["start_time"] = time_str.split("-")[0].strip()
+            custom_match_data[user_id]["end_time"] = time_str.split("-")[1].strip()
+        else:
+            custom_match_data[user_id]["start_time"] = time_str
+            custom_match_data[user_id]["end_time"] = ""
+        utils.admin_state[user_id] = "cm_logo"
+        return await update.message.reply_text("🖼️ লোগোর লিংক দিন (না থাকলে N লিখুন):", reply_markup=ReplyKeyboardMarkup([["N", "❌ বাতিল করুন"]], resize_keyboard=True))
+
+    elif state == "cm_logo":
+        custom_match_data[user_id]["logo"] = "" if text.upper() == "N" else text
+        utils.admin_state[user_id] = "cm_target"
+        return await update.message.reply_text("কোথায় পোস্ট করতে চান?", reply_markup=ReplyKeyboardMarkup([["Telegram Only", "Web Only", "Both"], ["❌ বাতিল করুন"]], resize_keyboard=True))
+
+    elif state == "cm_target":
+        if text not in TARGET_MAP: return await update.message.reply_text("সঠিক অপশন নির্বাচন করুন।")
+        target = TARGET_MAP[text]
+        data = custom_match_data[user_id]
+
+        short_id = await db.create_short_link(
+            stream_url=data["url"], referer="", origin="", cookie="", user_agent="", source_url="Custom Match",
+            title=data["title"], logo=data.get("logo", ""), stream_type=data.get("type", "hls"),
+            drm_key_id=data.get("drm_key_id", ""), drm_key=data.get("drm_key", ""),
+            start_time=data.get("start_time", ""), end_time=data.get("end_time", "")
+        )
+
+        msg_id = None
+        if target in ["tg", "both"]:
+            msg_id = await post_to_tg_channel(context, data["title"], "Custom Live Match", data.get("logo", ""), short_id)
+
+        await db.save_posted_stream(
+            stream_url=data["url"], title=data["title"], source_url="Custom Match", message_id=msg_id,
+            short_id=short_id, target=target, logo=data.get("logo", ""), headers={},
+            stream_type=data.get("type", "hls"), drm_key_id=data.get("drm_key_id", ""),
+            drm_key=data.get("drm_key", ""), start_time=data.get("start_time", ""), end_time=data.get("end_time", "")
+        )
+
+        utils.admin_state.pop(user_id, None)
+        custom_match_data.pop(user_id, None)
+        return await update.message.reply_text(f"✅ কাস্টম ম্যাচ সফলভাবে {text} এ পোস্ট করা হয়েছে!", reply_markup=admin_keyboard)
+
+    # ==========================================
+    # আগের সব বেসিক কমান্ড
+    # ==========================================
+    
     if state == "select_target":
         if text in TARGET_MAP:
             utils.admin_state[user_id] = f"add_link_{TARGET_MAP[text]}"
@@ -266,7 +351,7 @@ async def admin_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
     if state == "delete_link":
         try: s, l = await db.remove_m3u_source(text)
         except ValueError: await db.remove_m3u_source(text); s, l = 0, 0
-        await update.message.reply_text(f"✅ সোর্স ডেটা মুছেছে।", reply_markup=admin_keyboard)
+        await update.message.reply_text("✅ সোর্স ডেটা মুছেছে।", reply_markup=admin_keyboard)
         return utils.admin_state.pop(user_id, None)
 
     if state == "ban_user":
@@ -313,6 +398,7 @@ async def admin_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text(status_text, parse_mode="HTML", disable_web_page_preview=True)
         
     elif text == "👥 মোট ইউজার": await update.message.reply_text(f"👥 মোট ইউজার: {len(await db.get_all_users())} জন")
+    
     elif text == "📊 অ্যানালিটিক্স":
         p, c = await db.get_stats(); users = len(await db.get_all_users())
         await update.message.reply_text(f"📊 <b>Enterprise Analytics</b>\n\n👥 Users: <code>{users}</code>\n📺 Posts: <code>{p}</code>\n🖱 Clicks: <code>{c}</code>", parse_mode="HTML")
