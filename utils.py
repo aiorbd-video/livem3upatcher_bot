@@ -12,7 +12,6 @@ try:
 except ImportError:
     HAS_PSUTIL = False
 
-# 🎯 ফিক্স: এই লাইনগুলো মুছে গিয়েছিল, এগুলো আবার অ্যাড করা হয়েছে
 USER_LIMIT = {}
 LIMIT_SECONDS = 3
 admin_state = {}
@@ -26,7 +25,6 @@ def allow_user(user_id: int) -> bool:
     return True
 
 def get_sys_status() -> str:
-    """সার্ভারের র‍্যাম এবং সিপিইউ দেখার ফাংশন"""
     uptime = str(timedelta(seconds=int(time.time() - START_TIME)))
     if HAS_PSUTIL:
         try:
@@ -50,10 +48,6 @@ async def fetch_m3u_content(url: str):
     return None
 
 def parse_m3u_playlist(content: str):
-    """
-    Universal Enterprise M3U Parser
-    যেকোনো বিকৃত, জোড়া লাগানো বা কাস্টম হেডার যুক্ত M3U ফাইল পার্স করতে সক্ষম
-    """
     streams = []
     
     content = content.replace("#TOTAL-VS-MATCHES:", "\n")
@@ -71,35 +65,47 @@ def parse_m3u_playlist(content: str):
             "referer": "", "origin": "", "cookie": "", "user_agent": "", "url": ""
         }
         
-        boundary_match = re.search(r'(#EXTVLCOPT:|#EXTHTTP:|https?://)', block)
-        if boundary_match:
-            meta_part = block[:boundary_match.start()]
-            rest_part = block[boundary_match.start():]
-        else:
-            meta_part = block
-            rest_part = ""
+        # 🎯 ১. সবার আগে লোগো এবং গ্রুপ নিরাপদে বের করা
+        logo_m = re.search(r'tvg-logo="([^"]+)"', block, re.IGNORECASE)
+        if logo_m:
+            stream["logo"] = logo_m.group(1).strip()
             
-        # 1. 메টাডেটা পার্সিং (লোগো, গ্রুপ, টাইটেল)
-        if 'group-title="' in meta_part: stream["group"] = meta_part.split('group-title="')[1].split('"')[0].strip()
-        elif 'group-title=' in meta_part: stream["group"] = meta_part.split('group-title=')[1].split()[0].split(',')[0].strip()
+        group_m = re.search(r'group-title="([^"]+)"', block, re.IGNORECASE)
+        if group_m:
+            stream["group"] = group_m.group(1).strip()
             
-        if 'tvg-logo="' in meta_part: stream["logo"] = meta_part.split('tvg-logo="')[1].split('"')[0].strip()
+        # 🎯 ২. কনফিউশন এড়াতে ব্লক থেকে লোগো ও গ্রুপের লিংকগুলো সাময়িকভাবে মুছে ফেলা
+        clean_block = block
+        if logo_m: clean_block = clean_block.replace(logo_m.group(0), "")
+        if group_m: clean_block = clean_block.replace(group_m.group(0), "")
+        
+        # 🎯 ৩. এখন শুধু ফ্রেশ টাইটেল এবং প্লেব্যাক লিংক পড়ে আছে
+        if ',' in clean_block:
+            after_comma = clean_block.split(',', 1)[1]
             
-        if ',' in meta_part:
-            if '",' in meta_part: raw_title = meta_part.split('",')[-1].strip()
-            else: raw_title = meta_part.split(',', 1)[-1].strip()
+            # টাইটেল কোথায় শেষ আর ভিডিও লিংক/হেডার কোথায় শুরু তা খোঁজা হচ্ছে
+            boundary_m = re.search(r'(#EXTVLCOPT:|#EXTHTTP:|https?://)', after_comma)
             
+            if boundary_m:
+                raw_title = after_comma[:boundary_m.start()].strip()
+                rest_part = after_comma[boundary_m.start():]
+            else:
+                raw_title = after_comma.strip()
+                rest_part = ""
+                
             raw_title = re.sub(r'^[:\- \t]+', '', raw_title)
-            if raw_title: stream["title"] = raw_title
+            if raw_title:
+                stream["title"] = raw_title
+        else:
+            rest_part = clean_block
 
-        # 2. হেডার এবং URL আন-গ্লুয়িং (Un-gluing)
+        # 🎯 ৪. প্লেব্যাক লিংক এবং হেডার (Cookie, Referer) এক্সট্রাকশন
         rest_part = rest_part.replace("#EXTVLCOPT:", "\n#EXTVLCOPT:")
         rest_part = rest_part.replace("#EXTHTTP:", "\n#EXTHTTP:")
         rest_part = re.sub(r'([^\s])(https?://)', r'\1\n\2', rest_part)
         
         rest_lines = [line.strip() for line in rest_part.splitlines() if line.strip()]
         
-        # 3. হেডার এবং টোকেন এক্সট্রাকশন
         for line in rest_lines:
             if line.startswith("#EXTVLCOPT:"):
                 opt = line.split(":", 1)[1]
