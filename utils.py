@@ -1,9 +1,9 @@
 import hashlib
 import time
 import re
-import json
 from datetime import timedelta
-from config import START_TIME
+import aiohttp
+from config import START_TIME, HEADERS
 
 try:
     import psutil
@@ -36,11 +36,20 @@ def get_sys_status() -> str:
 def make_stream_hash(stream_url: str) -> str:
     return hashlib.md5(stream_url.encode()).hexdigest()
 
+async def fetch_m3u_content(url: str):
+    try:
+        async with aiohttp.ClientSession(headers=HEADERS) as session:
+            async with session.get(url, timeout=20) as response:
+                if response.status == 200:
+                    return await response.text()
+    except Exception as e:
+        print(f"Fetch error: {e}")
+    return None
+
 def parse_m3u_playlist(content: str):
     streams = []
-    clean = re.sub(r"#TOTAL-VS-MATCHES:[^\n#]*", "", content)
-    clean = re.sub(r"#LAST-UPDATED:[^\n#]*", "", clean)
-    blocks = clean.split("#EXTINF")
+    # হ্যাং হওয়া থেকে বাঁচতে সেফ রিপ্লেস
+    blocks = content.split("#EXTINF")
 
     for idx, block in enumerate(blocks):
         if not block.strip() or block.startswith("#EXTM3U"): continue
@@ -51,33 +60,25 @@ def parse_m3u_playlist(content: str):
         
         extinf_line = lines[0]
         
-        if g_match := re.search(r'group-title=(?:"([^"]+)"|([^\s,]+))', extinf_line, re.IGNORECASE): 
-            stream["group"] = (g_match.group(1) or g_match.group(2)).strip()
-            
-        if l_match := re.search(r'tvg-logo=(?:"([^"]+)"|([^\s,]+))', extinf_line, re.IGNORECASE): 
-            stream["logo"] = (l_match.group(1) or l_match.group(2)).strip()
+        # নিরাপদ লোগো এবং গ্রুপ পার্সিং
+        if g_match := re.search(r'group-title="([^"]+)"', extinf_line, re.IGNORECASE): 
+            stream["group"] = g_match.group(1).strip()
+        if l_match := re.search(r'tvg-logo="([^"]+)"', extinf_line, re.IGNORECASE): 
+            stream["logo"] = l_match.group(1).strip()
         
-        # 🎯 ফিক্স: কমা ও কোটেশন বাইপাস করে ১০০% সঠিক টাইটেল এক্সট্রাক্ট
-        raw_title = ""
-        if '"' in extinf_line:
-            parts = re.split(r'"\s*,', extinf_line)
-            if len(parts) > 1:
-                raw_title = parts[-1].strip()
-            else:
-                raw_title = extinf_line.split(",")[-1].strip()
-        else:
-            raw_title = extinf_line.split(",", 1)[-1].strip()
-        
-        # নামের সাথে কোনো URL বা হ্যাশ থাকলে মুছে ফেলা
-        raw_title = re.sub(r'https?://[^\s]+', '', raw_title).strip()
+        # 🎯 সেফ টাইটেল এক্সট্রাকশন (NO HANG)
+        parts = extinf_line.split(',')
+        raw_title = parts[-1].strip()
+        raw_title = re.sub(r'https?://[^\s]+', '', raw_title).strip() # ক্লিনিং
         stream["title"] = raw_title if raw_title else f"Live Stream {idx}"
 
+        # হেডার পার্সিং
         if ref_m := re.search(r"#EXTVLCOPT:http-referrer=([^#\n]+)", block, re.IGNORECASE): stream["referer"] = ref_m.group(1).strip()
         if orig_m := re.search(r"#EXTVLCOPT:http-origin=([^#\n]+)", block, re.IGNORECASE): stream["origin"] = orig_m.group(1).strip()
         if cookie_m := re.search(r"#EXTVLCOPT:http-cookie=([^#\n]+)", block, re.IGNORECASE): stream["cookie"] = cookie_m.group(1).strip()
         if ua_m := re.search(r"#EXTVLCOPT:http-user-agent=([^#\n]+)", block, re.IGNORECASE): stream["user_agent"] = ua_m.group(1).strip()
 
-        # 🎯 সুপার ফিক্স: একদম নিখুঁতভাবে ভিডিও লিংক বের করার লজিক
+        # নিখুঁত লিংক পার্সিং
         for line in lines[1:]:
             line = line.strip()
             if line and not line.startswith('#'):
