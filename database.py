@@ -13,10 +13,15 @@ posted_col = db["posted_streams"]
 links_col = db["short_links"]
 stats_col = db["app_stats"]
 
-# 🎯 ফিক্স: এই ফাংশনটি না থাকার কারণেই আপনার বট ক্র্যাশ করছিল
 async def create_indexes():
-    """ডেটাবেস ফাস্ট করার জন্য এবং ক্র্যাশ এড়ানোর জন্য ইনডেক্স তৈরি করা"""
+    """ডেটাবেস ফাস্ট করা এবং পুরোনো ক্র্যাশ করা ইনডেক্স রিমুভ করা"""
     try:
+        # 🎯 ফিক্স: পুরোনো এরর করা ডুপ্লিকেট রুলসটি (stream_hash_1) ডেটাবেস থেকে মুছে ফেলা হচ্ছে
+        try:
+            await posted_col.drop_index("stream_hash_1")
+        except Exception:
+            pass # যদি আগে থেকেই মোছা থাকে, তবে কোনো এরর দেবে না
+            
         await users_col.create_index("user_id", unique=True)
         await links_col.create_index("short_id", unique=True)
     except Exception as e:
