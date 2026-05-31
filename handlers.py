@@ -1,10 +1,11 @@
 import asyncio
+import aiohttp
 from datetime import datetime
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ContextTypes
 from telegram.error import RetryAfter
 import database as db
-from config import BOT_USERNAME, CHANNEL_ID, ADMIN_ID, DELETE_TIME, bd_tz, FORCE_CHANNELS
+from config import BOT_USERNAME, CHANNEL_ID, ADMIN_ID, DELETE_TIME, bd_tz, FORCE_CHANNELS, HEADERS
 import utils
 
 admin_keyboard = ReplyKeyboardMarkup([
@@ -63,7 +64,8 @@ async def post_to_tg_channel(context, title, category, logo, short_id):
     except RetryAfter as flood_err:
         await asyncio.sleep(flood_err.retry_after)
         return await post_to_tg_channel(context, title, category, logo, short_id)
-    except Exception: return None
+    except Exception: 
+        return None
 
 async def edit_tg_channel_post(context, title, category, short_id, message_id):
     text, markup = get_post_content(title, category, short_id)
@@ -76,7 +78,8 @@ async def edit_tg_channel_post(context, title, category, short_id, message_id):
     except RetryAfter as flood_err:
         await asyncio.sleep(flood_err.retry_after)
         await edit_tg_channel_post(context, title, category, short_id, message_id)
-    except Exception: pass
+    except Exception:
+        pass
 
 async def send_stream_message(context, chat_id, data, message_to_edit=None):
     msg_text = f"✅ <b>স্ট্রিম অ্যাক্সেস অনুমোদিত!</b>\n\n🔗 <b>আপনার প্লেব্যাক লিংক:</b>\n<code>{data['stream_url']}</code>\n"
@@ -101,6 +104,7 @@ async def delete_link_message(context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=job_data["chat_id"], text="⚠️ <b>মেয়াদ উত্তীর্ণ:</b>\nলিংকের মেয়াদ শেষ। চ্যানেল থেকে পুনরায় ক্লিক করুন।", parse_mode="HTML")
     except Exception: pass
 
+# 🎯 কোর ইঞ্জিন: হ্যাং প্রিভেনশন + ওয়েব ডাটাবেস রিস্টোর
 async def process_all_sources(context: ContextTypes.DEFAULT_TYPE, status_msg=None, force_repost=False):
     sources = await db.get_m3u_sources()
     stats = {"sources": len(sources), "total_streams": 0, "new_posts": 0, "updated_posts": 0, "failed": 0, "ended": 0}
@@ -109,7 +113,7 @@ async def process_all_sources(context: ContextTypes.DEFAULT_TYPE, status_msg=Non
         await db.posted_col.delete_many({})
 
     for idx, src_data in enumerate(sources, 1):
-        source = src_data["url"] if isinstance(src_data, dict) else src_data
+        source = src_data.get("url") if isinstance(src_data, dict) else src_data
         target = src_data.get("target", "both") if isinstance(src_data, dict) else "both"
         
         if status_msg:
@@ -159,17 +163,22 @@ async def process_all_sources(context: ContextTypes.DEFAULT_TYPE, status_msg=Non
                 if target in ["tg", "both"] and msg_id:
                     await edit_tg_channel_post(context, title, item["group"], short_id_exist, msg_id)
                 
+                # 🎯 ফিক্স: ওয়েব ডাটাবেস এডিট সেভ
+                await db.save_posted_stream(item["url"], title, source, msg_id, short_id_exist, target, item.get("logo", ""))
                 stats["updated_posts"] += 1
                 continue
 
-            short_id = await db.create_short_link(item["url"], item["referer"], item["origin"], item["cookie"], item["user_agent"], source)
+            short_id = await db.create_short_link(item["url"], item["referer"], item["origin"], item["cookie"], item["user_agent"], source, title=title)
             msg_id = None
-            if target in ["tg", "both"]: msg_id = await post_to_tg_channel(context, title, item["group"], item.get("logo", ""), short_id)
+            if target in ["tg", "both"]: 
+                msg_id = await post_to_tg_channel(context, title, item["group"], item.get("logo", ""), short_id)
             
             if msg_id or target == "web":
-                await db.save_posted_stream(item["url"], title, source, msg_id, short_id)
+                # 🎯 ফিক্স: ওয়েব ডাটাবেসে নতুন পোস্ট সেভ
+                await db.save_posted_stream(item["url"], title, source, msg_id, short_id, target, item.get("logo", ""))
                 stats["new_posts"] += 1
-            else: stats["failed"] += 1
+            else: 
+                stats["failed"] += 1
         
         if not force_repost:
             cursor = db.posted_col.find({"source_url": source})
@@ -313,4 +322,4 @@ async def admin_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
     elif text == "🔁 সব নতুন করে পোস্ট করুন":
         status_msg = await update.message.reply_text("⚠️ <b>প্রসেস শুরু হচ্ছে, দয়া করে অপেক্ষা করুন...</b>", parse_mode="HTML")
         stats = await process_all_sources(context, status_msg=status_msg, force_repost=True)
-        await status_msg.edit_text(f"✅ <b>ফোর্স রিপোস্ট সম্পন্ন!</b>\n\n📊 <b>রিপোর্ট:</b>\n🔗 সোর্স: <code>{stats['sources']}</code>\n📺 মোট স্ট্রিম: <code>{stats['total_streams']}</code>\n🆕 চ্যানেলে নতুন পোস্ট: <code>{stats['new_posts']}</code>\n❌ ব্যর্থ: <code>{stats['failed']}</code>", parse_mode="HTML")
+        await status_msg.edit_text(f"✅ <b>ফোর্স রিপোস্ট সম্পন্ন!</b>\n\n📊 <b>রিপোর্ট:</b>\n🔗 সোর্স: <code>{stats['sources']}</code>\n📺 মোট স্ট্রিম: <code>{stats['total_streams']}</code>\n🆕 চ্যানেলে/ওয়েবে নতুন পোস্ট: <code>{stats['new_posts']}</code>\n❌ ব্যর্থ: <code>{stats['failed']}</code>", parse_mode="HTML")
