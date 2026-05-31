@@ -1,11 +1,10 @@
 import asyncio
-import aiohttp
 from datetime import datetime
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ContextTypes
 from telegram.error import RetryAfter
 import database as db
-from config import BOT_USERNAME, CHANNEL_ID, ADMIN_ID, DELETE_TIME, bd_tz, FORCE_CHANNELS, HEADERS
+from config import BOT_USERNAME, CHANNEL_ID, ADMIN_ID, DELETE_TIME, bd_tz, FORCE_CHANNELS
 import utils
 
 admin_keyboard = ReplyKeyboardMarkup([
@@ -52,7 +51,7 @@ def get_post_content(title, category, short_id):
 async def post_to_tg_channel(context, title, category, logo, short_id):
     text, markup = get_post_content(title, category, short_id)
     try:
-        await asyncio.sleep(2) # FloodWait এড়াতে ২ সেকেন্ড বিরতি
+        await asyncio.sleep(2)
         if logo and logo.startswith("http"):
             try:
                 msg = await context.bot.send_photo(chat_id=CHANNEL_ID, photo=logo, caption=text, reply_markup=markup, parse_mode="HTML")
@@ -64,8 +63,7 @@ async def post_to_tg_channel(context, title, category, logo, short_id):
     except RetryAfter as flood_err:
         await asyncio.sleep(flood_err.retry_after)
         return await post_to_tg_channel(context, title, category, logo, short_id)
-    except Exception: 
-        return None
+    except Exception: return None
 
 async def edit_tg_channel_post(context, title, category, short_id, message_id):
     text, markup = get_post_content(title, category, short_id)
@@ -78,8 +76,7 @@ async def edit_tg_channel_post(context, title, category, short_id, message_id):
     except RetryAfter as flood_err:
         await asyncio.sleep(flood_err.retry_after)
         await edit_tg_channel_post(context, title, category, short_id, message_id)
-    except Exception:
-        pass
+    except Exception: pass
 
 async def send_stream_message(context, chat_id, data, message_to_edit=None):
     msg_text = f"✅ <b>স্ট্রিম অ্যাক্সেস অনুমোদিত!</b>\n\n🔗 <b>আপনার প্লেব্যাক লিংক:</b>\n<code>{data['stream_url']}</code>\n"
@@ -104,14 +101,6 @@ async def delete_link_message(context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=job_data["chat_id"], text="⚠️ <b>মেয়াদ উত্তীর্ণ:</b>\nলিংকের মেয়াদ শেষ। চ্যানেল থেকে পুনরায় ক্লিক করুন।", parse_mode="HTML")
     except Exception: pass
 
-async def fetch_m3u_content(url):
-    try:
-        async with aiohttp.ClientSession(headers=HEADERS) as session:
-            async with session.get(url, timeout=15) as response:
-                return await response.text() if response.status == 200 else None
-    except Exception: return None
-
-# 🎯 কোর স্ক্যানিং এবং আপডেট ইঞ্জিন (লাইভ প্রোগ্রেস সহ)
 async def process_all_sources(context: ContextTypes.DEFAULT_TYPE, status_msg=None, force_repost=False):
     sources = await db.get_m3u_sources()
     stats = {"sources": len(sources), "total_streams": 0, "new_posts": 0, "updated_posts": 0, "failed": 0, "ended": 0}
@@ -127,12 +116,17 @@ async def process_all_sources(context: ContextTypes.DEFAULT_TYPE, status_msg=Non
             try: await status_msg.edit_text(f"🔄 <b>সোর্স স্ক্যানিং চলছে... ({idx}/{len(sources)})</b>\n🔗 <code>{source}</code>\n⏳ ডেটা ডাউনলোড হচ্ছে...", parse_mode="HTML", disable_web_page_preview=True)
             except Exception: pass
 
-        content = await fetch_m3u_content(source)
+        content = await utils.fetch_m3u_content(source)
         if not content:
             stats["failed"] += 1
             continue
+            
+        if status_msg:
+            try: await status_msg.edit_text(f"🔄 <b>সোর্স স্ক্যানিং চলছে... ({idx}/{len(sources)})</b>\n🔗 <code>{source}</code>\n✅ ডেটা ডাউনলোড সম্পন্ন! পার্সিং হচ্ছে...", parse_mode="HTML", disable_web_page_preview=True)
+            except Exception: pass
         
-        streams = utils.parse_m3u_playlist(content)
+        # 🎯 ফিক্স: বট হ্যাং হওয়া এড়াতে পার্সারকে আলাদা থ্রেডে রান করানো হলো
+        streams = await asyncio.to_thread(utils.parse_m3u_playlist, content)
         total_s = len(streams)
         stats["total_streams"] += total_s
         active_titles = []
@@ -142,20 +136,11 @@ async def process_all_sources(context: ContextTypes.DEFAULT_TYPE, status_msg=Non
             title = item["title"]
             active_titles.append(title)
             
-            # 📊 নতুন সংযোজন: লাইভ প্রোগ্রেস বার
             if status_msg and force_repost:
-                # প্রতি ৩টি পোস্টে একবার স্ক্রিন আপডেট করবে (টেলিগ্রাম লিমিট এড়াতে)
-                if s_idx % 3 == 0 or s_idx == total_s:
+                if s_idx % 5 == 0 or s_idx == total_s:
                     try:
-                        progress_text = (
-                            f"⚠️ <b>নতুন পোস্ট তৈরি হচ্ছে...</b>\n\n"
-                            f"📂 <b>সোর্স:</b> {idx} / {len(sources)}\n"
-                            f"📺 <b>প্রসেস হচ্ছে:</b> <b>{s_idx} / {total_s}</b>\n\n"
-                            f"<i>(একবারে অনেক পোস্ট হওয়ায় টেলিগ্রামের স্প্যাম লিমিট এড়াতে বট স্বয়ংক্রিয়ভাবে মাঝে মাঝে বিরতি নেবে। দয়া করে অপেক্ষা করুন...)</i>"
-                        )
-                        await status_msg.edit_text(progress_text, parse_mode="HTML", disable_web_page_preview=True)
-                    except RetryAfter as e:
-                        await asyncio.sleep(e.retry_after)
+                        await status_msg.edit_text(f"⚠️ <b>পোস্টিং চলছে...</b>\n📂 সোর্স: {idx}/{len(sources)}\n📺 প্রসেস: <b>{s_idx}/{total_s}</b>", parse_mode="HTML", disable_web_page_preview=True)
+                    except RetryAfter as e: await asyncio.sleep(e.retry_after)
                     except Exception: pass
 
             existing_post = await db.posted_col.find_one({"title": title, "source_url": source})
@@ -168,10 +153,7 @@ async def process_all_sources(context: ContextTypes.DEFAULT_TYPE, status_msg=Non
                 if short_id_exist:
                     await db.links_col.update_one(
                         {"short_id": short_id_exist}, 
-                        {"$set": {
-                            "stream_url": item["url"], "referer": item["referer"], "origin": item["origin"],
-                            "cookie": item["cookie"], "user_agent": item["user_agent"], "updated_at": datetime.utcnow()
-                        }}
+                        {"$set": {"stream_url": item["url"], "referer": item["referer"], "origin": item["origin"], "cookie": item["cookie"], "user_agent": item["user_agent"], "updated_at": datetime.utcnow()}}
                     )
 
                 if target in ["tg", "both"] and msg_id:
@@ -180,18 +162,14 @@ async def process_all_sources(context: ContextTypes.DEFAULT_TYPE, status_msg=Non
                 stats["updated_posts"] += 1
                 continue
 
-            # নতুন শর্ট আইডি এবং পোস্ট
             short_id = await db.create_short_link(item["url"], item["referer"], item["origin"], item["cookie"], item["user_agent"], source)
-            
             msg_id = None
-            if target in ["tg", "both"]:
-                msg_id = await post_to_tg_channel(context, title, item["group"], item.get("logo", ""), short_id)
+            if target in ["tg", "both"]: msg_id = await post_to_tg_channel(context, title, item["group"], item.get("logo", ""), short_id)
             
             if msg_id or target == "web":
                 await db.save_posted_stream(item["url"], title, source, msg_id, short_id)
                 stats["new_posts"] += 1
-            else: 
-                stats["failed"] += 1
+            else: stats["failed"] += 1
         
         if not force_repost:
             cursor = db.posted_col.find({"source_url": source})
@@ -200,22 +178,17 @@ async def process_all_sources(context: ContextTypes.DEFAULT_TYPE, status_msg=Non
                     msg_id = exp.get("message_id")
                     if msg_id and target in ["tg", "both"]:
                         ended_text = f"🚫 <b>স্ট্রিম সমাপ্ত (Stream Ended)</b>\n\n📡 <b>{exp.get('title', 'Unknown')}</b>\n\n🔴 <i>এই লাইভ স্ট্রিমটি এখন আর সচল নেই। পরবর্তী খেলার জন্য চ্যানেলে চোখ রাখুন।</i>\n⚡ <i>All In One Reborn</i>"
-                        try:
-                            await context.bot.edit_message_caption(chat_id=CHANNEL_ID, message_id=msg_id, caption=ended_text, parse_mode="HTML")
+                        try: await context.bot.edit_message_caption(chat_id=CHANNEL_ID, message_id=msg_id, caption=ended_text, parse_mode="HTML")
                         except Exception:
-                            try:
-                                await context.bot.edit_message_text(chat_id=CHANNEL_ID, message_id=msg_id, text=ended_text, parse_mode="HTML", disable_web_page_preview=True)
+                            try: await context.bot.edit_message_text(chat_id=CHANNEL_ID, message_id=msg_id, text=ended_text, parse_mode="HTML", disable_web_page_preview=True)
                             except Exception: pass
-                    
                     await db.posted_col.delete_one({"_id": exp["_id"]})
-                    if exp.get("short_id"):
-                        await db.links_col.delete_one({"short_id": exp["short_id"]})
+                    if exp.get("short_id"): await db.links_col.delete_one({"short_id": exp["short_id"]})
                     stats["ended"] += 1
 
     return stats
 
-async def auto_checker_job(context: ContextTypes.DEFAULT_TYPE):
-    await process_all_sources(context)
+async def auto_checker_job(context: ContextTypes.DEFAULT_TYPE): await process_all_sources(context)
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -280,9 +253,7 @@ async def admin_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
         return utils.admin_state.pop(user_id, None)
 
     if state == "ban_user":
-        try:
-            await db.toggle_ban_user(int(text), True)
-            await update.message.reply_text("✅ ইউজার ব্যানড।", reply_markup=admin_keyboard)
+        try: await db.toggle_ban_user(int(text), True); await update.message.reply_text("✅ ইউজার ব্যানড।", reply_markup=admin_keyboard)
         except ValueError: await update.message.reply_text("❌ ভুল আইডি।")
         return utils.admin_state.pop(user_id, None)
 
@@ -324,28 +295,15 @@ async def admin_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
             status_text += f"🔹 <b>সোর্স {idx}:</b>\n🔗 <code>{src}</code>\n🟢 <b>লাইভ পোস্ট:</b> <code>{count}</code> টি\n\n"
         await update.message.reply_text(status_text, parse_mode="HTML", disable_web_page_preview=True)
         
-    elif text == "👥 মোট ইউজার":
-        await update.message.reply_text(f"👥 মোট ইউজার: {len(await db.get_all_users())} জন")
-        
+    elif text == "👥 মোট ইউজার": await update.message.reply_text(f"👥 মোট ইউজার: {len(await db.get_all_users())} জন")
     elif text == "📊 অ্যানালিটিক্স":
-        p, c = await db.get_stats()
-        users = len(await db.get_all_users())
+        p, c = await db.get_stats(); users = len(await db.get_all_users())
         await update.message.reply_text(f"📊 <b>Enterprise Analytics</b>\n\n👥 Users: <code>{users}</code>\n📺 Posts: <code>{p}</code>\n🖱 Clicks: <code>{c}</code>", parse_mode="HTML")
         
-    elif text == "📢 ব্রডকাস্ট":
-        utils.admin_state[user_id] = "broadcast"
-        await update.message.reply_text("📝 মেসেজ লিখুন:", reply_markup=ReplyKeyboardMarkup([["❌ বাতিল করুন"]], resize_keyboard=True))
-        
-    elif text == "🚫 ইউজার ব্যান":
-        utils.admin_state[user_id] = "ban_user"
-        await update.message.reply_text("🚫 User ID দিন:", reply_markup=ReplyKeyboardMarkup([["❌ বাতিল করুন"]], resize_keyboard=True))
-        
-    elif text == "✅ আনব্যান":
-        utils.admin_state[user_id] = "unban_user"
-        await update.message.reply_text("✅ User ID দিন:", reply_markup=ReplyKeyboardMarkup([["❌ বাতিল করুন"]], resize_keyboard=True))
-        
-    elif text == "⚙️ সিস্টেম স্ট্যাটাস":
-        await update.message.reply_text(utils.get_sys_status(), parse_mode="HTML")
+    elif text == "📢 ব্রডকাস্ট": utils.admin_state[user_id] = "broadcast"; await update.message.reply_text("📝 মেসেজ লিখুন:", reply_markup=ReplyKeyboardMarkup([["❌ বাতিল করুন"]], resize_keyboard=True))
+    elif text == "🚫 ইউজার ব্যান": utils.admin_state[user_id] = "ban_user"; await update.message.reply_text("🚫 User ID দিন:", reply_markup=ReplyKeyboardMarkup([["❌ বাতিল করুন"]], resize_keyboard=True))
+    elif text == "✅ আনব্যান": utils.admin_state[user_id] = "unban_user"; await update.message.reply_text("✅ User ID দিন:", reply_markup=ReplyKeyboardMarkup([["❌ বাতিল করুন"]], resize_keyboard=True))
+    elif text == "⚙️ সিস্টেম স্ট্যাটাস": await update.message.reply_text(utils.get_sys_status(), parse_mode="HTML")
         
     elif text == "🔄 ফোর্স চেক":
         status_msg = await update.message.reply_text("🔍 স্ক্যানিং শুরু হচ্ছে...")
