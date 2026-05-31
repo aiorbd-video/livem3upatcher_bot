@@ -1,4 +1,3 @@
-# ফাইল: handlers.py
 import asyncio
 import aiohttp
 from datetime import datetime
@@ -36,10 +35,21 @@ def get_force_join_keyboard(payload=None):
 
 def get_post_content(title, category, short_id):
     now_time = datetime.now(bd_tz).strftime("%I:%M %p (%d %b)")
-    text = f"📡 <b>{title}</b>\n\n📂 <b>ক্যাটাগরি:</b> {category}\n🟢 <b>[LIVE] লাইভ স্ট্রিমটি সচল আছে</b>\n\n🔄 <b>সর্বশেষ আপডেট:</b> <code>{now_time}</code>\n⚡ <i>All In One Reborn</i>"
     
+    # 🎯 ফিক্স: চ্যানেলের মেসেজ থেকে ডিরেক্ট লিংক রিমুভ করে দেওয়া হয়েছে
+    text = (
+        f"📡 <b>{title}</b>\n\n"
+        f"📂 <b>ক্যাটাগরি:</b> {category}\n"
+        f"🟢 <b>[LIVE] লাইভ স্ট্রিমটি সচল আছে</b>\n\n"
+        f"📝 এইচডি কোয়ালিটিতে সরাসরি খেলা উপভোগ করুন।\n\n"
+        f"🔄 <b>সর্বশেষ আপডেট:</b> <code>{now_time}</code>\n"
+        f"⚡ <i>All In One Reborn</i>"
+    )
+    
+    # 🎯 ফিক্স: VipXtream এর ওয়েবসাইট বাটন আকারে যুক্ত করা হয়েছে
     markup = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📺 সরাসরি দেখুন (Telegram)", url=f"https://t.me/{BOT_USERNAME}?start={short_id}")]
+        [InlineKeyboardButton("🌐 সরাসরি দেখুন (VipXtream Web)", url=f"https://vipxtream.vercel.app/")],
+        [InlineKeyboardButton("📺 প্লেয়ারে দেখুন (Telegram)", url=f"https://t.me/{BOT_USERNAME}?start={short_id}")]
     ])
     return text, markup
 
@@ -110,7 +120,10 @@ async def process_all_sources(context: ContextTypes.DEFAULT_TYPE, status_msg=Non
     if force_repost: await db.posted_col.delete_many({})
 
     for src_data in sources:
-        source, target = src_data["url"], src_data["target"]
+        # Dictionary structure checking
+        source = src_data["url"] if isinstance(src_data, dict) else src_data
+        target = src_data["target"] if isinstance(src_data, dict) and "target" in src_data else "both"
+        
         content = await fetch_m3u_content(source)
         if not content:
             stats["failed"] += 1
@@ -125,27 +138,39 @@ async def process_all_sources(context: ContextTypes.DEFAULT_TYPE, status_msg=Non
             title = item["title"]
             active_titles.append(title)
             
-            existing_post = await db.get_existing_post(title)
-            short_id = await db.create_short_link(item["url"], item["referer"], item["origin"], item["cookie"], item["user_agent"], source, title=title)
+            # 🎯 ডুপ্লিকেট রোধের মেইন লজিক
+            existing_post = await db.posted_col.find_one({"title": title, "source_url": source})
 
             if existing_post and not force_repost:
-                if existing_post.get("stream_url") != item["url"]:
-                    msg_id = existing_post.get("message_id")
-                    if msg_id and target in ["tg", "both"]:
-                        await edit_tg_channel_post(context, title, item["group"], short_id, msg_id)
-                    
-                    # 🎯 ফিক্স: লোগো আপডেট করা হচ্ছে
-                    await db.save_posted_stream(item["url"], title, source, msg_id, short_id, target, item.get("logo", ""))
-                    stats["updated_posts"] += 1
+                msg_id = existing_post.get("message_id")
+                short_id_exist = existing_post.get("short_id")
+                
+                # যদি লিংক, কুকি বা কিছু চেঞ্জ হয়, তবে ডেটাবেস আপডেট করবে এবং মেসেজ এডিট করবে (কোনো নতুন পোস্ট হবে না)
+                await db.posted_col.update_one({"_id": existing_post["_id"]}, {"$set": {"stream_url": item["url"], "posted_at": datetime.utcnow()}})
+                if short_id_exist:
+                    await db.links_col.update_one(
+                        {"short_id": short_id_exist}, 
+                        {"$set": {
+                            "stream_url": item["url"], "referer": item["referer"], "origin": item["origin"],
+                            "cookie": item["cookie"], "user_agent": item["user_agent"], "updated_at": datetime.utcnow()
+                        }}
+                    )
+
+                if target in ["tg", "both"] and msg_id:
+                    await edit_tg_channel_post(context, title, item["group"], short_id_exist, msg_id)
+                
+                stats["updated_posts"] += 1
                 continue
 
+            # 🎯 যদি আগে পোস্ট না থাকে তবেই নতুন শর্ট আইডি বানাবে এবং পোস্ট করবে
+            short_id = await db.create_short_link(item["url"], item["referer"], item["origin"], item["cookie"], item["user_agent"], source)
+            
             msg_id = None
             if target in ["tg", "both"]:
                 msg_id = await post_to_tg_channel(context, title, item["group"], item["logo"], short_id)
             
             if msg_id or target == "web":
-                # 🎯 ফিক্স: নতুন পোস্টে লোগো সেভ করা হচ্ছে
-                await db.save_posted_stream(item["url"], title, source, msg_id, short_id, target, item.get("logo", ""))
+                await db.save_posted_stream(item["url"], title, source, msg_id, short_id)
                 stats["new_posts"] += 1
             else: 
                 stats["failed"] += 1
@@ -186,7 +211,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if payload:
         stream_data = await db.get_stream_data(payload)
         if stream_data:
-            await db.track_click(stream_data.get("title"))
+            await db.track_click()
             await send_stream_message(context, update.effective_chat.id, stream_data)
         else: await update.message.reply_text("❌ লিংকের মেয়াদ শেষ বা স্ট্রিমটি আর সচল নেই!")
         return
@@ -225,13 +250,16 @@ async def admin_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
         return await update.message.reply_text("❌ সঠিক অপশন নির্বাচন করুন।")
         
     if state and state.startswith("add_link_"):
-        await db.add_m3u_source(text, state.split("_", 2)[2])
+        # যদি আপনার ডাটাবেস ফাংশনে টার্গেট আর্গুমেন্ট না থাকে, তবে শুধু text পাস করবে
+        try: await db.add_m3u_source(text, state.split("_", 2)[2])
+        except TypeError: await db.add_m3u_source(text)
         await update.message.reply_text("✅ সোর্স সেভ হয়েছে।", reply_markup=admin_keyboard)
         return utils.admin_state.pop(user_id, None)
 
     if state == "delete_link":
-        s, l = await db.remove_m3u_source(text)
-        await update.message.reply_text(f"✅ সোর্স ও তার {s}+{l} ডেটা মুছেছে।", reply_markup=admin_keyboard)
+        try: s, l = await db.remove_m3u_source(text)
+        except ValueError: await db.remove_m3u_source(text); s, l = 0, 0
+        await update.message.reply_text(f"✅ সোর্স ডেটা মুছেছে।", reply_markup=admin_keyboard)
         return utils.admin_state.pop(user_id, None)
 
     if state == "ban_user":
@@ -274,9 +302,9 @@ async def admin_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
         if not sources: return await update.message.reply_text("❌ ডাটাবেসে কোনো লিংক নেই।")
         status_text = "📊 <b>লাইভ সোর্স স্ট্যাটাস</b>\n\n"
         for idx, src_data in enumerate(sources, 1):
-            src = src_data["url"]
+            src = src_data["url"] if isinstance(src_data, dict) else src_data
             count = await db.posted_col.count_documents({"source_url": src})
-            status_text += f"🔹 <b>সোর্স {idx} ({src_data['target'].upper()}):</b>\n🔗 <code>{src}</code>\n🟢 <b>লাইভ পোস্ট:</b> <code>{count}</code> টি\n\n"
+            status_text += f"🔹 <b>সোর্স {idx}:</b>\n🔗 <code>{src}</code>\n🟢 <b>লাইভ পোস্ট:</b> <code>{count}</code> টি\n\n"
         await update.message.reply_text(status_text, parse_mode="HTML", disable_web_page_preview=True)
         
     elif text == "👥 মোট ইউজার":
@@ -284,9 +312,8 @@ async def admin_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
         
     elif text == "📊 অ্যানালিটিক্স":
         p, c = await db.get_stats()
-        top = await db.get_top_stream()
         users = len(await db.get_all_users())
-        await update.message.reply_text(f"📊 <b>Enterprise Analytics</b>\n\n👥 Users: <code>{users}</code>\n📺 Posts: <code>{p}</code>\n🖱 Clicks: <code>{c}</code>\n🔥 Top Stream: <code>{top}</code>", parse_mode="HTML")
+        await update.message.reply_text(f"📊 <b>Enterprise Analytics</b>\n\n👥 Users: <code>{users}</code>\n📺 Posts: <code>{p}</code>\n🖱 Clicks: <code>{c}</code>", parse_mode="HTML")
         
     elif text == "📢 ব্রডকাস্ট":
         utils.admin_state[user_id] = "broadcast"
@@ -312,3 +339,5 @@ async def admin_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
         status_msg = await update.message.reply_text("⚠️ ডাটাবেস রিসেট করে সব নতুন করে পোস্ট করা হচ্ছে...")
         stats = await process_all_sources(context, status_msg=status_msg, force_repost=True)
         await status_msg.edit_text(f"✅ ফোর্স রিপোস্ট সম্পন্ন! মোট পোস্ট: {stats['new_posts']}")
+
+# নিশ্চিত করুন মেইন ফাইলে MessageHandler কল করার সময় `admin_message_handler` ফাংশনটি যুক্ত আছে।
