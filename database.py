@@ -22,72 +22,43 @@ async def create_indexes():
     except Exception as e:
         print(f"Index setup warning: {e}")
 
-async def add_user(user_id: int):
-    await users_col.update_one({"user_id": user_id}, {"$setOnInsert": {"user_id": user_id, "joined_at": datetime.utcnow(), "is_banned": False}}, upsert=True)
+async def add_user(user_id: int): await users_col.update_one({"user_id": user_id}, {"$setOnInsert": {"user_id": user_id, "joined_at": datetime.utcnow(), "is_banned": False}}, upsert=True)
+async def get_all_users(): return [doc["user_id"] async for doc in users_col.find({"is_banned": {"$ne": True}})]
+async def is_user_banned(user_id: int): user = await users_col.find_one({"user_id": user_id}); return user.get("is_banned", False) if user else False
+async def toggle_ban_user(user_id: int, ban_status: bool): result = await users_col.update_one({"user_id": user_id}, {"$set": {"is_banned": ban_status}}); return result.modified_count > 0
+async def add_m3u_source(url: str, target: str = "both"): await sources_col.update_one({"url": url}, {"$set": {"url": url, "target": target, "added_at": datetime.utcnow()}}, upsert=True)
+async def remove_m3u_source(url: str): await sources_col.delete_one({"url": url}); await posted_col.delete_many({"source_url": url}); await links_col.delete_many({"source_url": url}); return 0, 0
+async def get_m3u_sources(): return [doc async for doc in sources_col.find({})]
 
-async def get_all_users():
-    return [doc["user_id"] async for doc in users_col.find({"is_banned": {"$ne": True}})]
-
-async def is_user_banned(user_id: int):
-    user = await users_col.find_one({"user_id": user_id})
-    return user.get("is_banned", False) if user else False
-
-async def toggle_ban_user(user_id: int, ban_status: bool):
-    result = await users_col.update_one({"user_id": user_id}, {"$set": {"is_banned": ban_status}})
-    return result.modified_count > 0
-
-async def add_m3u_source(url: str, target: str = "both"):
-    await sources_col.update_one({"url": url}, {"$set": {"url": url, "target": target, "added_at": datetime.utcnow()}}, upsert=True)
-
-async def remove_m3u_source(url: str):
-    await sources_col.delete_one({"url": url})
-    deleted_streams = await posted_col.delete_many({"source_url": url})
-    deleted_links = await links_col.delete_many({"source_url": url})
-    return deleted_streams.deleted_count, deleted_links.deleted_count
-
-async def get_m3u_sources():
-    return [doc async for doc in sources_col.find({})]
-
-async def save_posted_stream(stream_url: str, title: str, source_url: str, message_id: int, short_id: str, target: str = "both", logo: str = "", headers=None):
+# 🎯 আপডেট: DASH, DRM, Start/End Time ফিল্ড যুক্ত করা হলো
+async def save_posted_stream(stream_url: str, title: str, source_url: str, message_id, short_id: str, target: str = "both", logo: str = "", headers=None, stream_type="hls", drm_key_id="", drm_key="", start_time="", end_time=""):
     if headers is None: headers = {}
     doc = {
         "title": title, "stream_url": stream_url, "source_url": source_url,
         "message_id": message_id, "short_id": short_id, "target": target, "logo": logo,
-        "referer": headers.get("referer", ""),
-        "origin": headers.get("origin", ""),
-        "cookie": headers.get("cookie", ""),
-        "user_agent": headers.get("user_agent", ""),
-        "posted_at": datetime.utcnow()
+        "referer": headers.get("referer", ""), "origin": headers.get("origin", ""),
+        "cookie": headers.get("cookie", ""), "user_agent": headers.get("user_agent", ""),
+        "stream_type": stream_type, "drm_key_id": drm_key_id, "drm_key": drm_key,
+        "start_time": start_time, "end_time": end_time, "posted_at": datetime.utcnow()
     }
     await posted_col.update_one({"title": title, "source_url": source_url}, {"$set": doc}, upsert=True)
     await stats_col.update_one({"stat_name": "total_posted"}, {"$inc": {"count": 1}}, upsert=True)
 
-async def create_short_link(stream_url: str, referer: str, origin: str, cookie: str, user_agent: str, source_url: str, title: str = ""):
+# 🎯 আপডেট: ওয়েব এ পাঠানোর জন্য short_link এ ডেটা যুক্ত করা হলো
+async def create_short_link(stream_url: str, referer: str, origin: str, cookie: str, user_agent: str, source_url: str, title: str = "", logo: str = "", stream_type="hls", drm_key_id="", drm_key="", start_time="", end_time=""):
     short_id = hashlib.md5((stream_url + str(time.time())).encode()).hexdigest()[:12]
     doc = {
-        "short_id": short_id, "stream_url": stream_url, "title": title, "referer": referer,
-        "origin": origin, "cookie": cookie, "user_agent": user_agent,
-        "source_url": source_url, "created_at": datetime.utcnow()
+        "short_id": short_id, "stream_url": stream_url, "title": title, "logo": logo,
+        "referer": referer, "origin": origin, "cookie": cookie, "user_agent": user_agent,
+        "source_url": source_url, "stream_type": stream_type, "drm_key_id": drm_key_id,
+        "drm_key": drm_key, "start_time": start_time, "end_time": end_time, "created_at": datetime.utcnow()
     }
     await links_col.update_one({"short_id": short_id}, {"$set": doc}, upsert=True)
     return short_id
 
-async def get_stream_data(short_id: str):
-    return await links_col.find_one({"short_id": short_id})
-
-async def track_click():
-    await stats_col.update_one({"stat_name": "total_clicks"}, {"$inc": {"count": 1}}, upsert=True)
-
+async def get_stream_data(short_id: str): return await links_col.find_one({"short_id": short_id})
+async def track_click(): await stats_col.update_one({"stat_name": "total_clicks"}, {"$inc": {"count": 1}}, upsert=True)
 async def get_stats():
     posted = await stats_col.find_one({"stat_name": "total_posted"})
     clicks = await stats_col.find_one({"stat_name": "total_clicks"})
     return (posted["count"] if posted else 0), (clicks["count"] if clicks else 0)
-
-async def remove_expired_streams(source_url: str, active_stream_urls: list):
-    if not active_stream_urls: return 0 
-    db_streams = posted_col.find({"source_url": source_url})
-    expired_urls = [doc["stream_url"] async for doc in db_streams if doc["stream_url"] not in active_stream_urls]
-    if expired_urls:
-        await posted_col.delete_many({"stream_url": {"$in": expired_urls}})
-        await links_col.delete_many({"stream_url": {"$in": expired_urls}})
-    return len(expired_urls)
