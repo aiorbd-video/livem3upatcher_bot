@@ -8,12 +8,13 @@ import database as db
 from config import BOT_USERNAME, CHANNEL_ID, ADMIN_ID, DELETE_TIME, bd_tz, FORCE_CHANNELS, HEADERS
 import utils
 
-# 🎯 কাস্টম ম্যাচ সেভ করার জন্য টেম্পোরারি স্টোরেজ
+# 🎯 নতুন: কাস্টম ম্যাচ ও M3U লিংক সেভ করার জন্য টেম্পোরারি স্টোরেজ
 custom_match_data = {}
+m3u_add_data = {} 
 
 admin_keyboard = ReplyKeyboardMarkup([
     ["➕ লিংক যুক্ত করুন", "➖ লিংক মুছুন"],
-    ["➕ কাস্টম ম্যাচ"], # 🎯 নতুন বাটন
+    ["➕ কাস্টম ম্যাচ"],
     ["📊 সোর্স লাইভ স্ট্যাটাস", "👥 মোট ইউজার"],
     ["🔁 সব নতুন করে পোস্ট করুন", "🔄 ফোর্স চেক"],
     ["📢 ব্রডকাস্ট", "📊 অ্যানালিটিক্স"],
@@ -118,6 +119,7 @@ async def process_all_sources(context: ContextTypes.DEFAULT_TYPE, status_msg=Non
     for idx, src_data in enumerate(sources, 1):
         source = src_data.get("url") if isinstance(src_data, dict) else src_data
         target = src_data.get("target", "both") if isinstance(src_data, dict) else "both"
+        proxy_url = src_data.get("proxy_url", "") if isinstance(src_data, dict) else "" # 🎯 প্রক্সি ডাটাবেস থেকে রিড করা হচ্ছে
         
         if status_msg:
             try: await status_msg.edit_text(f"🔄 <b>সোর্স স্ক্যানিং চলছে... ({idx}/{len(sources)})</b>\n🔗 <code>{source}</code>\n⏳ ডেটা ডাউনলোড হচ্ছে...", parse_mode="HTML", disable_web_page_preview=True)
@@ -165,23 +167,24 @@ async def process_all_sources(context: ContextTypes.DEFAULT_TYPE, status_msg=Non
                 if short_id_exist:
                     await db.links_col.update_one(
                         {"short_id": short_id_exist}, 
-                        {"$set": {"stream_url": item["url"], "referer": headers["referer"], "origin": headers["origin"], "cookie": headers["cookie"], "user_agent": headers["user_agent"], "updated_at": datetime.utcnow()}}
+                        {"$set": {"stream_url": item["url"], "referer": headers["referer"], "origin": headers["origin"], "cookie": headers["cookie"], "user_agent": headers["user_agent"], "proxy_url": proxy_url, "updated_at": datetime.utcnow()}}
                     )
 
                 if target in ["tg", "both"] and msg_id:
                     await edit_tg_channel_post(context, title, item.get("group", "লাইভ টিভি"), short_id_exist, msg_id)
                 
-                await db.save_posted_stream(item["url"], title, source, msg_id, short_id_exist, target, item.get("logo", ""), headers=headers)
+                # 🎯 ডাটাবেসে সেভ করা হচ্ছে
+                await db.save_posted_stream(item["url"], title, source, msg_id, short_id_exist, target, item.get("logo", ""), headers=headers, proxy_url=proxy_url)
                 stats["updated_posts"] += 1
                 continue
 
-            short_id = await db.create_short_link(item["url"], headers["referer"], headers["origin"], headers["cookie"], headers["user_agent"], source, title=title)
+            short_id = await db.create_short_link(item["url"], headers["referer"], headers["origin"], headers["cookie"], headers["user_agent"], source, title=title, proxy_url=proxy_url)
             msg_id = None
             if target in ["tg", "both"]: 
                 msg_id = await post_to_tg_channel(context, title, item.get("group", "লাইভ টিভি"), item.get("logo", ""), short_id)
             
             if msg_id or target == "web":
-                await db.save_posted_stream(item["url"], title, source, msg_id, short_id, target, item.get("logo", ""), headers=headers)
+                await db.save_posted_stream(item["url"], title, source, msg_id, short_id, target, item.get("logo", ""), headers=headers, proxy_url=proxy_url)
                 stats["new_posts"] += 1
             else: 
                 stats["failed"] += 1
@@ -204,7 +207,6 @@ async def process_all_sources(context: ContextTypes.DEFAULT_TYPE, status_msg=Non
     return stats
 
 async def auto_checker_job(context: ContextTypes.DEFAULT_TYPE): await process_all_sources(context)
-
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -251,10 +253,11 @@ async def admin_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
     if text == "❌ বাতিল করুন" or (state and text == "❌ বাতিল করুন"):
         utils.admin_state.pop(user_id, None)
         custom_match_data.pop(user_id, None)
+        m3u_add_data.pop(user_id, None)
         return await update.message.reply_text("❌ প্রক্রিয়া বাতিল করা হয়েছে।", reply_markup=admin_keyboard)
 
     # ==========================================
-    # 🌟 কাস্টম ম্যাচ প্রসেসিং (DASH/HLS/DRM/Time)
+    # 🌟 কাস্টম ম্যাচ প্রসেসিং (DASH/HLS/DRM/Time/Proxy)
     # ==========================================
     if text == "➕ কাস্টম ম্যাচ":
         utils.admin_state[user_id] = "cm_title"
@@ -302,6 +305,12 @@ async def admin_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
     elif state == "cm_logo":
         custom_match_data[user_id]["logo"] = "" if text.upper() == "N" else text
+        utils.admin_state[user_id] = "cm_proxy"
+        # 🎯 প্রক্সি চাওয়া হচ্ছে
+        return await update.message.reply_text("🌐 কাস্টম প্রক্সি URL দিন (যেমন: https://ratul...workers.dev/?url=)\nপ্রক্সি না লাগলে N লিখুন:", reply_markup=ReplyKeyboardMarkup([["N", "❌ বাতিল করুন"]], resize_keyboard=True))
+
+    elif state == "cm_proxy":
+        custom_match_data[user_id]["proxy_url"] = "" if text.upper() == "N" else text
         utils.admin_state[user_id] = "cm_target"
         return await update.message.reply_text("কোথায় পোস্ট করতে চান?", reply_markup=ReplyKeyboardMarkup([["Telegram Only", "Web Only", "Both"], ["❌ বাতিল করুন"]], resize_keyboard=True))
 
@@ -314,7 +323,8 @@ async def admin_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
             stream_url=data["url"], referer="", origin="", cookie="", user_agent="", source_url="Custom Match",
             title=data["title"], logo=data.get("logo", ""), stream_type=data.get("type", "hls"),
             drm_key_id=data.get("drm_key_id", ""), drm_key=data.get("drm_key", ""),
-            start_time=data.get("start_time", ""), end_time=data.get("end_time", "")
+            start_time=data.get("start_time", ""), end_time=data.get("end_time", ""),
+            proxy_url=data.get("proxy_url", "")
         )
 
         msg_id = None
@@ -325,7 +335,8 @@ async def admin_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
             stream_url=data["url"], title=data["title"], source_url="Custom Match", message_id=msg_id,
             short_id=short_id, target=target, logo=data.get("logo", ""), headers={},
             stream_type=data.get("type", "hls"), drm_key_id=data.get("drm_key_id", ""),
-            drm_key=data.get("drm_key", ""), start_time=data.get("start_time", ""), end_time=data.get("end_time", "")
+            drm_key=data.get("drm_key", ""), start_time=data.get("start_time", ""), end_time=data.get("end_time", ""),
+            proxy_url=data.get("proxy_url", "")
         )
 
         utils.admin_state.pop(user_id, None)
@@ -333,21 +344,41 @@ async def admin_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
         return await update.message.reply_text(f"✅ কাস্টম ম্যাচ সফলভাবে {text} এ পোস্ট করা হয়েছে!", reply_markup=admin_keyboard)
 
     # ==========================================
-    # আগের সব বেসিক কমান্ড
+    # 🌟 প্লেলিস্ট / M3U লিংক যুক্ত করা (Proxy সহ)
     # ==========================================
-    
-    if state == "select_target":
+    if text == "➕ লিংক যুক্ত করুন":
+        utils.admin_state[user_id] = "m3u_target"
+        m3u_add_data[user_id] = {}
+        return await update.message.reply_text("কোথায় পোস্ট করতে চান নির্বাচন করুন:", reply_markup=ReplyKeyboardMarkup([["Telegram Only", "Web Only", "Both"], ["❌ বাতিল করুন"]], resize_keyboard=True))
+
+    elif state == "m3u_target":
         if text in TARGET_MAP:
-            utils.admin_state[user_id] = f"add_link_{TARGET_MAP[text]}"
+            m3u_add_data[user_id]["target"] = TARGET_MAP[text]
+            utils.admin_state[user_id] = "m3u_url"
             return await update.message.reply_text("🔗 এবার M3U লিংকটি দিন:", reply_markup=ReplyKeyboardMarkup([["❌ বাতিল করুন"]], resize_keyboard=True))
         return await update.message.reply_text("❌ সঠিক অপশন নির্বাচন করুন।")
-        
-    if state and state.startswith("add_link_"):
-        try: await db.add_m3u_source(text, state.split("_", 2)[2])
-        except TypeError: await db.add_m3u_source(text)
-        await update.message.reply_text("✅ সোর্স সেভ হয়েছে।", reply_markup=admin_keyboard)
-        return utils.admin_state.pop(user_id, None)
 
+    elif state == "m3u_url":
+        m3u_add_data[user_id]["url"] = text
+        utils.admin_state[user_id] = "m3u_proxy"
+        # 🎯 প্রক্সি চাওয়া হচ্ছে
+        return await update.message.reply_text("🌐 এই প্লেলিস্টের জন্য প্রক্সি URL দিন (যেমন: https://ratul...workers.dev/?url=)\nনা লাগলে N লিখুন:", reply_markup=ReplyKeyboardMarkup([["N", "❌ বাতিল করুন"]], resize_keyboard=True))
+
+    elif state == "m3u_proxy":
+        proxy = "" if text.upper() == "N" else text
+        target = m3u_add_data[user_id]["target"]
+        url = m3u_add_data[user_id]["url"]
+        
+        await db.add_m3u_source(url, target, proxy)
+        await update.message.reply_text("✅ সোর্স সেভ হয়েছে।", reply_markup=admin_keyboard)
+        
+        utils.admin_state.pop(user_id, None)
+        m3u_add_data.pop(user_id, None)
+        return
+
+    # ==========================================
+    # আগের সব বেসিক কমান্ড
+    # ==========================================
     if state == "delete_link":
         try: s, l = await db.remove_m3u_source(text)
         except ValueError: await db.remove_m3u_source(text); s, l = 0, 0
@@ -379,10 +410,6 @@ async def admin_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
         await msg.edit_text(f"✅ ব্রডকাস্ট সফল: {sent} জন।")
         return utils.admin_state.pop(user_id, None)
 
-    if text == "➕ লিংক যুক্ত করুন":
-        utils.admin_state[user_id] = "select_target"
-        await update.message.reply_text("কোথায় পোস্ট করতে চান নির্বাচন করুন:", reply_markup=ReplyKeyboardMarkup([["Telegram Only", "Web Only", "Both"], ["❌ বাতিল করুন"]], resize_keyboard=True))
-        
     elif text == "➖ লিংক মুছুন":
         utils.admin_state[user_id] = "delete_link"
         await update.message.reply_text("🗑 লিংক দিন:", reply_markup=ReplyKeyboardMarkup([["❌ বাতিল করুন"]], resize_keyboard=True))
