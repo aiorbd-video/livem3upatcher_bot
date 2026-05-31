@@ -35,8 +35,6 @@ def get_force_join_keyboard(payload=None):
 
 def get_post_content(title, category, short_id):
     now_time = datetime.now(bd_tz).strftime("%I:%M %p (%d %b)")
-    
-    # 🎯 ফিক্স: চ্যানেলের মেসেজ থেকে ডিরেক্ট লিংক রিমুভ করে দেওয়া হয়েছে
     text = (
         f"📡 <b>{title}</b>\n\n"
         f"📂 <b>ক্যাটাগরি:</b> {category}\n"
@@ -45,8 +43,6 @@ def get_post_content(title, category, short_id):
         f"🔄 <b>সর্বশেষ আপডেট:</b> <code>{now_time}</code>\n"
         f"⚡ <i>All In One Reborn</i>"
     )
-    
-    # 🎯 ফিক্স: VipXtream এর ওয়েবসাইট বাটন আকারে যুক্ত করা হয়েছে
     markup = InlineKeyboardMarkup([
         [InlineKeyboardButton("🌐 সরাসরি দেখুন (VipXtream Web)", url=f"https://vipxtream.vercel.app/")],
         [InlineKeyboardButton("📺 প্লেয়ারে দেখুন (Telegram)", url=f"https://t.me/{BOT_USERNAME}?start={short_id}")]
@@ -56,17 +52,19 @@ def get_post_content(title, category, short_id):
 async def post_to_tg_channel(context, title, category, logo, short_id):
     text, markup = get_post_content(title, category, short_id)
     try:
-        await asyncio.sleep(1)
+        await asyncio.sleep(2) # FloodWait এড়াতে ২ সেকেন্ড বিরতি
         if logo and logo.startswith("http"):
-            msg = await context.bot.send_photo(chat_id=CHANNEL_ID, photo=logo, caption=text, reply_markup=markup, parse_mode="HTML")
-        else:
-            msg = await context.bot.send_message(chat_id=CHANNEL_ID, text=text, reply_markup=markup, parse_mode="HTML", disable_web_page_preview=True)
+            try:
+                msg = await context.bot.send_photo(chat_id=CHANNEL_ID, photo=logo, caption=text, reply_markup=markup, parse_mode="HTML")
+                return msg.message_id
+            except Exception: pass
+            
+        msg = await context.bot.send_message(chat_id=CHANNEL_ID, text=text, reply_markup=markup, parse_mode="HTML", disable_web_page_preview=True)
         return msg.message_id
     except RetryAfter as flood_err:
         await asyncio.sleep(flood_err.retry_after)
         return await post_to_tg_channel(context, title, category, logo, short_id)
-    except Exception as e: 
-        print(f"Error posting: {e}")
+    except Exception: 
         return None
 
 async def edit_tg_channel_post(context, title, category, short_id, message_id):
@@ -113,39 +111,59 @@ async def fetch_m3u_content(url):
                 return await response.text() if response.status == 200 else None
     except Exception: return None
 
-# 🎯 কোর স্ক্যানিং এবং আপডেট ইঞ্জিন
+# 🎯 কোর স্ক্যানিং এবং আপডেট ইঞ্জিন (লাইভ প্রোগ্রেস সহ)
 async def process_all_sources(context: ContextTypes.DEFAULT_TYPE, status_msg=None, force_repost=False):
     sources = await db.get_m3u_sources()
     stats = {"sources": len(sources), "total_streams": 0, "new_posts": 0, "updated_posts": 0, "failed": 0, "ended": 0}
-    if force_repost: await db.posted_col.delete_many({})
+    
+    if force_repost: 
+        await db.posted_col.delete_many({})
 
-    for src_data in sources:
-        # Dictionary structure checking
+    for idx, src_data in enumerate(sources, 1):
         source = src_data["url"] if isinstance(src_data, dict) else src_data
-        target = src_data["target"] if isinstance(src_data, dict) and "target" in src_data else "both"
+        target = src_data.get("target", "both") if isinstance(src_data, dict) else "both"
         
+        if status_msg:
+            try: await status_msg.edit_text(f"🔄 <b>সোর্স স্ক্যানিং চলছে... ({idx}/{len(sources)})</b>\n🔗 <code>{source}</code>\n⏳ ডেটা ডাউনলোড হচ্ছে...", parse_mode="HTML", disable_web_page_preview=True)
+            except Exception: pass
+
         content = await fetch_m3u_content(source)
         if not content:
             stats["failed"] += 1
             continue
         
         streams = utils.parse_m3u_playlist(content)
-        stats["total_streams"] += len(streams)
+        total_s = len(streams)
+        stats["total_streams"] += total_s
         active_titles = []
 
-        for item in streams:
+        for s_idx, item in enumerate(streams, 1):
             if not item.get("url") or not item.get("title"): continue
             title = item["title"]
             active_titles.append(title)
             
-            # 🎯 ডুপ্লিকেট রোধের মেইন লজিক
+            # 📊 নতুন সংযোজন: লাইভ প্রোগ্রেস বার
+            if status_msg and force_repost:
+                # প্রতি ৩টি পোস্টে একবার স্ক্রিন আপডেট করবে (টেলিগ্রাম লিমিট এড়াতে)
+                if s_idx % 3 == 0 or s_idx == total_s:
+                    try:
+                        progress_text = (
+                            f"⚠️ <b>নতুন পোস্ট তৈরি হচ্ছে...</b>\n\n"
+                            f"📂 <b>সোর্স:</b> {idx} / {len(sources)}\n"
+                            f"📺 <b>প্রসেস হচ্ছে:</b> <b>{s_idx} / {total_s}</b>\n\n"
+                            f"<i>(একবারে অনেক পোস্ট হওয়ায় টেলিগ্রামের স্প্যাম লিমিট এড়াতে বট স্বয়ংক্রিয়ভাবে মাঝে মাঝে বিরতি নেবে। দয়া করে অপেক্ষা করুন...)</i>"
+                        )
+                        await status_msg.edit_text(progress_text, parse_mode="HTML", disable_web_page_preview=True)
+                    except RetryAfter as e:
+                        await asyncio.sleep(e.retry_after)
+                    except Exception: pass
+
             existing_post = await db.posted_col.find_one({"title": title, "source_url": source})
 
             if existing_post and not force_repost:
                 msg_id = existing_post.get("message_id")
                 short_id_exist = existing_post.get("short_id")
                 
-                # যদি লিংক, কুকি বা কিছু চেঞ্জ হয়, তবে ডেটাবেস আপডেট করবে এবং মেসেজ এডিট করবে (কোনো নতুন পোস্ট হবে না)
                 await db.posted_col.update_one({"_id": existing_post["_id"]}, {"$set": {"stream_url": item["url"], "posted_at": datetime.utcnow()}})
                 if short_id_exist:
                     await db.links_col.update_one(
@@ -162,12 +180,12 @@ async def process_all_sources(context: ContextTypes.DEFAULT_TYPE, status_msg=Non
                 stats["updated_posts"] += 1
                 continue
 
-            # 🎯 যদি আগে পোস্ট না থাকে তবেই নতুন শর্ট আইডি বানাবে এবং পোস্ট করবে
+            # নতুন শর্ট আইডি এবং পোস্ট
             short_id = await db.create_short_link(item["url"], item["referer"], item["origin"], item["cookie"], item["user_agent"], source)
             
             msg_id = None
             if target in ["tg", "both"]:
-                msg_id = await post_to_tg_channel(context, title, item["group"], item["logo"], short_id)
+                msg_id = await post_to_tg_channel(context, title, item["group"], item.get("logo", ""), short_id)
             
             if msg_id or target == "web":
                 await db.save_posted_stream(item["url"], title, source, msg_id, short_id)
@@ -250,7 +268,6 @@ async def admin_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
         return await update.message.reply_text("❌ সঠিক অপশন নির্বাচন করুন।")
         
     if state and state.startswith("add_link_"):
-        # যদি আপনার ডাটাবেস ফাংশনে টার্গেট আর্গুমেন্ট না থাকে, তবে শুধু text পাস করবে
         try: await db.add_m3u_source(text, state.split("_", 2)[2])
         except TypeError: await db.add_m3u_source(text)
         await update.message.reply_text("✅ সোর্স সেভ হয়েছে।", reply_markup=admin_keyboard)
@@ -336,8 +353,6 @@ async def admin_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
         await status_msg.edit_text(f"✅ স্ক্যান সম্পন্ন!\n\n🆕 নতুন পোস্ট: {stats['new_posts']}\n🔄 আপডেট: {stats['updated_posts']}\n🚫 সমাপ্ত স্ট্রিম: {stats['ended']}")
         
     elif text == "🔁 সব নতুন করে পোস্ট করুন":
-        status_msg = await update.message.reply_text("⚠️ ডাটাবেস রিসেট করে সব নতুন করে পোস্ট করা হচ্ছে...")
+        status_msg = await update.message.reply_text("⚠️ <b>প্রসেস শুরু হচ্ছে, দয়া করে অপেক্ষা করুন...</b>", parse_mode="HTML")
         stats = await process_all_sources(context, status_msg=status_msg, force_repost=True)
-        await status_msg.edit_text(f"✅ ফোর্স রিপোস্ট সম্পন্ন! মোট পোস্ট: {stats['new_posts']}")
-
-# নিশ্চিত করুন মেইন ফাইলে MessageHandler কল করার সময় `admin_message_handler` ফাংশনটি যুক্ত আছে।
+        await status_msg.edit_text(f"✅ <b>ফোর্স রিপোস্ট সম্পন্ন!</b>\n\n📊 <b>রিপোর্ট:</b>\n🔗 সোর্স: <code>{stats['sources']}</code>\n📺 মোট স্ট্রিম: <code>{stats['total_streams']}</code>\n🆕 চ্যানেলে নতুন পোস্ট: <code>{stats['new_posts']}</code>\n❌ ব্যর্থ: <code>{stats['failed']}</code>", parse_mode="HTML")
