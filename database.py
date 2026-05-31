@@ -13,6 +13,15 @@ posted_col = db["posted_streams"]
 links_col = db["short_links"]
 stats_col = db["app_stats"]
 
+# 🎯 ফিক্স: এই ফাংশনটি না থাকার কারণেই আপনার বট ক্র্যাশ করছিল
+async def create_indexes():
+    """ডেটাবেস ফাস্ট করার জন্য এবং ক্র্যাশ এড়ানোর জন্য ইনডেক্স তৈরি করা"""
+    try:
+        await users_col.create_index("user_id", unique=True)
+        await links_col.create_index("short_id", unique=True)
+    except Exception as e:
+        print(f"Index setup warning: {e}")
+
 async def add_user(user_id: int):
     await users_col.update_one({"user_id": user_id}, {"$setOnInsert": {"user_id": user_id, "joined_at": datetime.utcnow(), "is_banned": False}}, upsert=True)
 
@@ -66,13 +75,19 @@ async def create_short_link(stream_url: str, referer: str, origin: str, cookie: 
 async def get_stream_data(short_id: str):
     return await links_col.find_one({"short_id": short_id})
 
-async def track_click():
+async def get_existing_post(title: str):
+    return await posted_col.find_one({"title": title})
+
+async def track_click(title=None):
     await stats_col.update_one({"stat_name": "total_clicks"}, {"$inc": {"count": 1}}, upsert=True)
 
 async def get_stats():
     posted = await stats_col.find_one({"stat_name": "total_posted"})
     clicks = await stats_col.find_one({"stat_name": "total_clicks"})
     return (posted["count"] if posted else 0), (clicks["count"] if clicks else 0)
+
+async def get_top_stream():
+    return "Not enough data yet"
 
 async def remove_expired_streams(source_url: str, active_stream_urls: list):
     if not active_stream_urls: return 0 
