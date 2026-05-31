@@ -2,7 +2,7 @@ import logging
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters
 from config import BOT_TOKEN, CHECK_TIME
 
-# 🎯 ফিক্স: admin_message_handler ঠিকমতো ইম্পোর্ট করা হয়েছে
+# 🎯 admin_message_handler ইম্পোর্ট করা হয়েছে
 from handlers import start_command, button_handler, admin_message_handler, auto_checker_job
 
 logging.basicConfig(
@@ -24,7 +24,7 @@ def main():
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CallbackQueryHandler(button_handler))
     
-    # 🎯 ফিক্স: এই লাইনটি না থাকার কারণেই আপনার বাটনগুলো কাজ করছিল না!
+    # 🎯 ফিক্স: এই লাইনটি যুক্ত করার ফলেই বাটনগুলো কাজ করবে!
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_message_handler))
 
     # ==========================================
