@@ -1,9 +1,8 @@
-# ফাইল: database.py
-import secrets
+import hashlib
+import time
 from datetime import datetime
 from motor.motor_asyncio import AsyncIOMotorClient
 from config import MONGO_URI
-from utils import make_stream_hash
 
 mongo_client = AsyncIOMotorClient(MONGO_URI)
 db = mongo_client["all_in_one_reborn_db"]
@@ -14,33 +13,8 @@ posted_col = db["posted_streams"]
 links_col = db["short_links"]
 stats_col = db["app_stats"]
 
-async def create_indexes():
-    async def safe_create_index(collection, keys, **kwargs):
-        try:
-            await collection.create_index(keys, **kwargs)
-        except Exception as e:
-            pass
-
-    await safe_create_index(users_col, "user_id")
-    await safe_create_index(users_col, "is_banned")
-    await safe_create_index(sources_col, "url", unique=True)
-    
-    # 🎯 stream_hash এর বদলে title কে প্রায়োরিটি দেওয়া হলো
-    await safe_create_index(posted_col, "title")
-    await safe_create_index(posted_col, "source_url")
-    
-    await safe_create_index(links_col, "short_id", unique=True)
-    await safe_create_index(links_col, "source_url")
-    await safe_create_index(links_col, "created_at", expireAfterSeconds=86400)
-    
-    await safe_create_index(stats_col, "stat_name", unique=True)
-
 async def add_user(user_id: int):
-    await users_col.update_one(
-        {"user_id": user_id},
-        {"$setOnInsert": {"user_id": user_id, "joined_at": datetime.utcnow(), "is_banned": False}},
-        upsert=True,
-    )
+    await users_col.update_one({"user_id": user_id}, {"$setOnInsert": {"user_id": user_id, "joined_at": datetime.utcnow(), "is_banned": False}}, upsert=True)
 
 async def get_all_users():
     return [doc["user_id"] async for doc in users_col.find({"is_banned": {"$ne": True}})]
@@ -53,12 +27,8 @@ async def toggle_ban_user(user_id: int, ban_status: bool):
     result = await users_col.update_one({"user_id": user_id}, {"$set": {"is_banned": ban_status}})
     return result.modified_count > 0
 
-async def add_m3u_source(url: str, target: str):
-    await sources_col.update_one(
-        {"url": url},
-        {"$set": {"url": url, "target": target, "added_at": datetime.utcnow()}},
-        upsert=True,
-    )
+async def add_m3u_source(url: str, target: str = "both"):
+    await sources_col.update_one({"url": url}, {"$set": {"url": url, "target": target, "added_at": datetime.utcnow()}}, upsert=True)
 
 async def remove_m3u_source(url: str):
     await sources_col.delete_one({"url": url})
@@ -67,60 +37,48 @@ async def remove_m3u_source(url: str):
     return deleted_streams.deleted_count, deleted_links.deleted_count
 
 async def get_m3u_sources():
-    return [{"url": doc["url"], "target": doc.get("target", "both")} async for doc in sources_col.find({})]
+    return [doc async for doc in sources_col.find({})]
 
-# 🎯 ম্যাজিক ফাংশন: আগে পোস্ট হয়েছে কি না চেক করার জন্য
-async def get_existing_post(title: str):
-    return await posted_col.find_one({"title": title})
-
-# 🎯 আপডেট: ফাংশনে logo প্যারামিটার যুক্ত করা হয়েছে এবং ডাটাবেসে সেভ করা হচ্ছে
-async def save_posted_stream(stream_url: str, title: str, source_url: str, message_id: int, short_id: str, target: str, logo: str = ""):
-    stream_hash = make_stream_hash(stream_url)
-    
-    # 🎯 টাইটেল দিয়ে চেক করে আপডেট করবে, হ্যাশ দিয়ে নয়
-    result = await posted_col.update_one(
-        {"title": title},
-        {
-            "$set": {
-                "title": title, "stream_hash": stream_hash, "stream_url": stream_url,
-                "source_url": source_url, "message_id": message_id, "short_id": short_id,
-                "target": target, "posted_at": datetime.utcnow(),
-                "logo": logo # 🎯 ম্যাজিক ফিক্স: ডাটাবেসে লোগো সেভ করা হচ্ছে
-            }
-        },
-        upsert=True,
+async def save_posted_stream(stream_url: str, title: str, source_url: str, message_id: int, short_id: str, target: str = "both", logo: str = ""):
+    await posted_col.update_one(
+        {"title": title, "source_url": source_url}, 
+        {"$set": {
+            "title": title, "stream_url": stream_url, "source_url": source_url,
+            "message_id": message_id, "short_id": short_id, "target": target, "logo": logo, "posted_at": datetime.utcnow()
+        }}, 
+        upsert=True
     )
-    if result.upserted_id is not None:
-        await stats_col.update_one({"stat_name": "total_posted"}, {"$inc": {"count": 1}}, upsert=True)
+    await stats_col.update_one({"stat_name": "total_posted"}, {"$inc": {"count": 1}}, upsert=True)
 
-async def create_short_link(stream_url, referer, origin, cookie, user_agent, source_url, title=""):
-    short_id = secrets.token_urlsafe(8)
+async def create_short_link(stream_url: str, referer: str, origin: str, cookie: str, user_agent: str, source_url: str, title: str = ""):
+    short_id = hashlib.md5((stream_url + str(time.time())).encode()).hexdigest()[:12]
     await links_col.update_one(
-        {"short_id": short_id},
-        {
-            "$set": {
-                "short_id": short_id, "stream_url": stream_url, "title": title, "referer": referer,
-                "origin": origin, "cookie": cookie, "user_agent": user_agent, "source_url": source_url,
-                "created_at": datetime.utcnow(),
-            }
-        },
-        upsert=True,
+        {"short_id": short_id}, 
+        {"$set": {
+            "short_id": short_id, "stream_url": stream_url, "title": title, "referer": referer,
+            "origin": origin, "cookie": cookie, "user_agent": user_agent,
+            "source_url": source_url, "created_at": datetime.utcnow()
+        }}, 
+        upsert=True
     )
     return short_id
 
 async def get_stream_data(short_id: str):
     return await links_col.find_one({"short_id": short_id})
 
-async def track_click(stream_name: str | None = None):
+async def track_click():
     await stats_col.update_one({"stat_name": "total_clicks"}, {"$inc": {"count": 1}}, upsert=True)
-    if stream_name:
-        await stats_col.update_one({"stat_name": f"stream::{stream_name}"}, {"$inc": {"count": 1}}, upsert=True)
 
 async def get_stats():
     posted = await stats_col.find_one({"stat_name": "total_posted"})
     clicks = await stats_col.find_one({"stat_name": "total_clicks"})
     return (posted["count"] if posted else 0), (clicks["count"] if clicks else 0)
 
-async def get_top_stream():
-    doc = await stats_col.find({"stat_name": {"$regex": r"^stream::"}}).sort("count", -1).limit(1).to_list(length=1)
-    return doc[0]["stat_name"].replace("stream::", "") if doc else "No Data"
+async def remove_expired_streams(source_url: str, active_stream_urls: list):
+    if not active_stream_urls: return 0 
+    db_streams = posted_col.find({"source_url": source_url})
+    expired_urls = [doc["stream_url"] async for doc in db_streams if doc["stream_url"] not in active_stream_urls]
+    if expired_urls:
+        await posted_col.delete_many({"stream_url": {"$in": expired_urls}})
+        await links_col.delete_many({"stream_url": {"$in": expired_urls}})
+    return len(expired_urls)
