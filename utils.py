@@ -1,4 +1,3 @@
-# ফাইল: utils.py
 import hashlib
 import time
 import re
@@ -58,10 +57,20 @@ def parse_m3u_playlist(content: str):
         if l_match := re.search(r'tvg-logo=(?:"([^"]+)"|([^\s,]+))', extinf_line, re.IGNORECASE): 
             stream["logo"] = (l_match.group(1) or l_match.group(2)).strip()
         
-        clean_title = re.sub(r'[a-zA-Z0-9\-]+=(?:"[^"]*"|[^\s,]+)', '', extinf_line)
-        clean_title = re.sub(r'^:[-0-9\s]+', '', clean_title)
-        clean_title = clean_title.lstrip(', ')
-        stream["title"] = clean_title.strip() if clean_title.strip() else f"Live Stream {idx}"
+        # 🎯 ফিক্স: কমা ও কোটেশন বাইপাস করে ১০০% সঠিক টাইটেল এক্সট্রাক্ট
+        raw_title = ""
+        if '"' in extinf_line:
+            parts = re.split(r'"\s*,', extinf_line)
+            if len(parts) > 1:
+                raw_title = parts[-1].strip()
+            else:
+                raw_title = extinf_line.split(",")[-1].strip()
+        else:
+            raw_title = extinf_line.split(",", 1)[-1].strip()
+        
+        # নামের সাথে কোনো URL বা হ্যাশ থাকলে মুছে ফেলা
+        raw_title = re.sub(r'https?://[^\s]+', '', raw_title).strip()
+        stream["title"] = raw_title if raw_title else f"Live Stream {idx}"
 
         if ref_m := re.search(r"#EXTVLCOPT:http-referrer=([^#\n]+)", block, re.IGNORECASE): stream["referer"] = ref_m.group(1).strip()
         if orig_m := re.search(r"#EXTVLCOPT:http-origin=([^#\n]+)", block, re.IGNORECASE): stream["origin"] = orig_m.group(1).strip()
@@ -71,11 +80,8 @@ def parse_m3u_playlist(content: str):
         # 🎯 সুপার ফিক্স: একদম নিখুঁতভাবে ভিডিও লিংক বের করার লজিক
         for line in lines[1:]:
             line = line.strip()
-            # যদি লাইনটি ফাঁকা না হয় এবং # দিয়ে শুরু না হয়, তবে ১০০% সেটিই আমাদের ভিডিও লিংক!
             if line and not line.startswith('#'):
                 playback_url = line
-                
-                # পাইপ (|) অপশন থাকলে সেটা হ্যান্ডেল করা
                 if "|" in playback_url:
                     parts = playback_url.split("|", 1)
                     playback_url, h_part = parts[0].strip(), parts[1]
@@ -85,9 +91,8 @@ def parse_m3u_playlist(content: str):
                     if p_ua := re.search(r"User-Agent=([^&]+)", h_part, re.IGNORECASE): stream["user_agent"] = p_ua.group(1).strip()
 
                 stream["url"] = playback_url
-                break # লিংক পেয়ে গেলে খোঁজা বন্ধ
+                break 
 
-        # 🎯 শুধুমাত্র লিংক পেলেই ডাটাবেসে সেভ করবে, ফালতু ডেটা সেভ করবে না
         if stream["url"]:
             streams.append(stream)
 
