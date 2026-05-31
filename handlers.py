@@ -55,9 +55,12 @@ async def post_to_tg_channel(context, title, category, logo, short_id):
         await asyncio.sleep(2)
         if logo and logo.startswith("http"):
             try:
+                # লোগো থাকলে ছবিসহ পোস্ট করার চেষ্টা
                 msg = await context.bot.send_photo(chat_id=CHANNEL_ID, photo=logo, caption=text, reply_markup=markup, parse_mode="HTML")
                 return msg.message_id
-            except Exception: pass
+            except Exception: 
+                # লোগো লোড না হলে বা টেলিগ্রাম ব্লক করলে সরাসরি টেক্সট পোস্ট
+                pass
             
         msg = await context.bot.send_message(chat_id=CHANNEL_ID, text=text, reply_markup=markup, parse_mode="HTML", disable_web_page_preview=True)
         return msg.message_id
@@ -104,7 +107,6 @@ async def delete_link_message(context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=job_data["chat_id"], text="⚠️ <b>মেয়াদ উত্তীর্ণ:</b>\nলিংকের মেয়াদ শেষ। চ্যানেল থেকে পুনরায় ক্লিক করুন।", parse_mode="HTML")
     except Exception: pass
 
-# 🎯 কোর ইঞ্জিন: হ্যাং প্রিভেনশন + ওয়েব ডাটাবেস রিস্টোর
 async def process_all_sources(context: ContextTypes.DEFAULT_TYPE, status_msg=None, force_repost=False):
     sources = await db.get_m3u_sources()
     stats = {"sources": len(sources), "total_streams": 0, "new_posts": 0, "updated_posts": 0, "failed": 0, "ended": 0}
@@ -129,7 +131,6 @@ async def process_all_sources(context: ContextTypes.DEFAULT_TYPE, status_msg=Non
             try: await status_msg.edit_text(f"🔄 <b>সোর্স স্ক্যানিং চলছে... ({idx}/{len(sources)})</b>\n🔗 <code>{source}</code>\n✅ ডেটা ডাউনলোড সম্পন্ন! পার্সিং হচ্ছে...", parse_mode="HTML", disable_web_page_preview=True)
             except Exception: pass
         
-        # 🎯 ফিক্স: বট হ্যাং হওয়া এড়াতে পার্সারকে আলাদা থ্রেডে রান করানো হলো
         streams = await asyncio.to_thread(utils.parse_m3u_playlist, content)
         total_s = len(streams)
         stats["total_streams"] += total_s
@@ -140,10 +141,17 @@ async def process_all_sources(context: ContextTypes.DEFAULT_TYPE, status_msg=Non
             title = item["title"]
             active_titles.append(title)
             
+            # 🎯 হেডার প্যাক করা হচ্ছে
+            headers = {
+                "referer": item.get("referer", ""),
+                "origin": item.get("origin", ""),
+                "cookie": item.get("cookie", ""),
+                "user_agent": item.get("user_agent", "")
+            }
+            
             if status_msg and force_repost:
                 if s_idx % 5 == 0 or s_idx == total_s:
-                    try:
-                        await status_msg.edit_text(f"⚠️ <b>পোস্টিং চলছে...</b>\n📂 সোর্স: {idx}/{len(sources)}\n📺 প্রসেস: <b>{s_idx}/{total_s}</b>", parse_mode="HTML", disable_web_page_preview=True)
+                    try: await status_msg.edit_text(f"⚠️ <b>পোস্টিং চলছে...</b>\n📂 সোর্স: {idx}/{len(sources)}\n📺 প্রসেস: <b>{s_idx}/{total_s}</b>", parse_mode="HTML", disable_web_page_preview=True)
                     except RetryAfter as e: await asyncio.sleep(e.retry_after)
                     except Exception: pass
 
@@ -157,25 +165,25 @@ async def process_all_sources(context: ContextTypes.DEFAULT_TYPE, status_msg=Non
                 if short_id_exist:
                     await db.links_col.update_one(
                         {"short_id": short_id_exist}, 
-                        {"$set": {"stream_url": item["url"], "referer": item["referer"], "origin": item["origin"], "cookie": item["cookie"], "user_agent": item["user_agent"], "updated_at": datetime.utcnow()}}
+                        {"$set": {"stream_url": item["url"], "referer": headers["referer"], "origin": headers["origin"], "cookie": headers["cookie"], "user_agent": headers["user_agent"], "updated_at": datetime.utcnow()}}
                     )
 
                 if target in ["tg", "both"] and msg_id:
                     await edit_tg_channel_post(context, title, item["group"], short_id_exist, msg_id)
                 
-                # 🎯 ফিক্স: ওয়েব ডাটাবেস এডিট সেভ
-                await db.save_posted_stream(item["url"], title, source, msg_id, short_id_exist, target, item.get("logo", ""))
+                # 🎯 হেডারসহ ডাটাবেস আপডেট
+                await db.save_posted_stream(item["url"], title, source, msg_id, short_id_exist, target, item.get("logo", ""), headers=headers)
                 stats["updated_posts"] += 1
                 continue
 
-            short_id = await db.create_short_link(item["url"], item["referer"], item["origin"], item["cookie"], item["user_agent"], source, title=title)
+            short_id = await db.create_short_link(item["url"], headers["referer"], headers["origin"], headers["cookie"], headers["user_agent"], source, title=title)
             msg_id = None
             if target in ["tg", "both"]: 
                 msg_id = await post_to_tg_channel(context, title, item["group"], item.get("logo", ""), short_id)
             
             if msg_id or target == "web":
-                # 🎯 ফিক্স: ওয়েব ডাটাবেসে নতুন পোস্ট সেভ
-                await db.save_posted_stream(item["url"], title, source, msg_id, short_id, target, item.get("logo", ""))
+                # 🎯 হেডারসহ নতুন পোস্ট সেভ
+                await db.save_posted_stream(item["url"], title, source, msg_id, short_id, target, item.get("logo", ""), headers=headers)
                 stats["new_posts"] += 1
             else: 
                 stats["failed"] += 1
