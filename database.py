@@ -27,14 +27,14 @@ async def get_all_users(): return [doc["user_id"] async for doc in users_col.fin
 async def is_user_banned(user_id: int): user = await users_col.find_one({"user_id": user_id}); return user.get("is_banned", False) if user else False
 async def toggle_ban_user(user_id: int, ban_status: bool): result = await users_col.update_one({"user_id": user_id}, {"$set": {"is_banned": ban_status}}); return result.modified_count > 0
 
-# 🎯 আপডেট: প্লেলিস্টে proxy_url যুক্ত করা হলো
+# 🎯 প্লেলিস্টে proxy_url যুক্ত করা হলো
 async def add_m3u_source(url: str, target: str = "both", proxy_url: str = ""): 
     await sources_col.update_one({"url": url}, {"$set": {"url": url, "target": target, "proxy_url": proxy_url, "added_at": datetime.utcnow()}}, upsert=True)
 
 async def remove_m3u_source(url: str): await sources_col.delete_one({"url": url}); await posted_col.delete_many({"source_url": url}); await links_col.delete_many({"source_url": url}); return 0, 0
 async def get_m3u_sources(): return [doc async for doc in sources_col.find({})]
 
-# 🎯 আপডেট: proxy_url সেভ করা
+# 🎯 proxy_url সেভ করা
 async def save_posted_stream(stream_url: str, title: str, source_url: str, message_id, short_id: str, target: str = "both", logo: str = "", headers=None, stream_type="hls", drm_key_id="", drm_key="", start_time="", end_time="", proxy_url=""):
     if headers is None: headers = {}
     doc = {
@@ -48,9 +48,10 @@ async def save_posted_stream(stream_url: str, title: str, source_url: str, messa
     await posted_col.update_one({"title": title, "source_url": source_url}, {"$set": doc}, upsert=True)
     await stats_col.update_one({"stat_name": "total_posted"}, {"$inc": {"count": 1}}, upsert=True)
 
-# 🎯 আপডেট: ওয়েব লিংকে proxy_url যুক্ত করা
+# 🎯 ফিক্সড: ওয়েব লিংকে proxy_url যুক্ত এবং ID পরিবর্তন রোধ করার লজিক
 async def create_short_link(stream_url: str, referer: str, origin: str, cookie: str, user_agent: str, source_url: str, title: str = "", logo: str = "", stream_type="hls", drm_key_id="", drm_key="", start_time="", end_time="", proxy_url=""):
-    short_id = hashlib.md5((stream_url + str(time.time())).encode()).hexdigest()[:12]
+    # ✅ এখানে time.time() বাদ দেওয়া হয়েছে, ফলে একই স্ট্রিম লিঙ্কের শর্ট আইডি সবসময় ফিক্সড ১২ ডিজিটের থাকবে।
+    short_id = hashlib.md5(stream_url.encode()).hexdigest()[:12]
     doc = {
         "short_id": short_id, "stream_url": stream_url, "title": title, "logo": logo,
         "referer": referer, "origin": origin, "cookie": cookie, "user_agent": user_agent,
